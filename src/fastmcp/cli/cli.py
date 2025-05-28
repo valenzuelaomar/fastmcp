@@ -1,4 +1,4 @@
-"""FastmMCP CLI tools."""
+"""FastMCP CLI tools."""
 
 import importlib.metadata
 import importlib.util
@@ -6,10 +6,12 @@ import os
 import platform
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
 import dotenv
+import httpx
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -18,6 +20,7 @@ from typer import Context, Exit
 import fastmcp
 from fastmcp.cli import claude
 from fastmcp.cli import run as run_module
+from fastmcp.settings import settings
 from fastmcp.utilities.logging import get_logger
 
 logger = get_logger("cli")
@@ -428,3 +431,99 @@ def install(
     else:
         logger.error(f"Failed to install {name} in Claude app")
         sys.exit(1)
+
+
+@dataclass(kw_only=True)
+class DeployConfig:
+    name: str
+    repo: str
+    entrypoint: str
+    github_token: str | None = None
+    branch: str | None = None
+
+
+@app.command()
+def deploy(
+    name: str = typer.Argument(..., help="Name of the MCP server"),
+    entrypoint: str = typer.Argument(
+        help="Entrypoint of the server, as a path relative to the root of the respository, in `path/to/file.py:server` format."
+    ),
+    repo: str | None = typer.Argument(
+        None,
+        help="Repository URL. Supported formats are: "
+        "`https://github.com/owner/repo`, "
+        "`https://github.com/owner/repo/tree/branch`, "
+        "`owner/repo`, "
+        "or "
+        "`owner/repo/tree/branch`. "
+        "If no branch is specified, it will be inferred from the working directory.",
+    ),
+    github_token: str | None = typer.Option(
+        None,
+        help="A GitHub token must be provided to access private repositories. The token can be short-lived, and will only be used once to access the repository code.",
+    ),
+) -> None:
+    if settings.deploy_endpoint is None:
+        raise ValueError("Deploy endpoint is not set")
+
+    if repo is None:
+        repo = infer_repo_url()
+
+    if ":" not in entrypoint:
+        raise ValueError("Entrypoint must be in `path/to/file.py:server` format. ")
+
+    response = httpx.post(
+        f"{settings.deploy_endpoint}",
+        json={
+            "name": name,
+            "repo": repo,
+            "entrypoint": entrypoint,
+            "github_token": github_token,
+        },
+    )
+
+    response.raise_for_status()
+
+    console.print(f"Deployed {name}.")
+
+
+def translate_to_http(url: str) -> str:
+    """
+    Translate a git URL to an HTTP URL.
+    """
+    url = url.strip()
+
+    if url.startswith("git@github.com:"):
+        url = "https://github.com/" + url.split("git@github.com:")[1]
+
+    if url.endswith(".git"):
+        url = url.removesuffix(".git")
+
+    return url
+
+
+def infer_repo_url() -> str:
+    """
+    Infer the repository URL from the current directory.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        url = result.stdout.strip()
+
+        url = translate_to_http(url)
+
+        if not url.startswith("https://github.com"):
+            raise ValueError("Repository URL must be from github.com")
+
+        return url
+
+    except (subprocess.CalledProcessError, ValueError):
+        raise ValueError(
+            "No repository specified, and this directory doesn't appear to be a "
+            "GitHub repository."
+        )

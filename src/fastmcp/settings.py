@@ -94,6 +94,8 @@ class Settings(BaseSettings):
         ),
     ] = None
 
+    deploy_endpoint: str | None = None
+
     @model_validator(mode="after")
     def setup_logging(self) -> Self:
         """Finalize the settings."""
