@@ -10,11 +10,12 @@ from mcp.server.auth.middleware.bearer_auth import (
     BearerAuthBackend,
     RequireAuthMiddleware,
 )
-from mcp.server.auth.routes import create_auth_routes
+from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
 from mcp.server.lowlevel.server import LifespanResultT
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http import EventStore
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
@@ -104,6 +105,18 @@ def setup_auth_middleware_and_routes(
         )
     )
 
+    # Add OAuth Protected Resource Metadata endpoint (RFC 9728)
+    # This is required by the MCP spec for OAuth discovery
+    # Note: We use the issuer URL as the resource URL since the actual
+    # resource URL depends on the transport and path configuration
+    auth_routes.extend(
+        create_protected_resource_routes(
+            resource_url=auth.issuer_url,
+            authorization_servers=[auth.issuer_url],
+            scopes_supported=auth.required_scopes,
+        )
+    )
+
     return middleware, auth_routes, required_scopes
 
 
@@ -185,17 +198,30 @@ def create_sse_app(
         server_routes.extend(auth_routes)
         server_middleware.extend(auth_middleware)
         # Auth is enabled, wrap endpoints with RequireAuthMiddleware
+        # Build the resource metadata URL
+        resource_metadata_url = AnyHttpUrl(
+            f"{str(auth.issuer_url).rstrip('/')}/.well-known/oauth-protected-resource"
+        )
+
         server_routes.append(
             Route(
                 sse_path,
-                endpoint=RequireAuthMiddleware(handle_sse, required_scopes),
+                endpoint=RequireAuthMiddleware(
+                    handle_sse,
+                    required_scopes,
+                    resource_metadata_url=resource_metadata_url,
+                ),
                 methods=["GET"],
             )
         )
         server_routes.append(
             Mount(
                 message_path,
-                app=RequireAuthMiddleware(sse.handle_post_message, required_scopes),
+                app=RequireAuthMiddleware(
+                    sse.handle_post_message,
+                    required_scopes,
+                    resource_metadata_url=resource_metadata_url,
+                ),
             )
         )
     else:
@@ -315,10 +341,19 @@ def create_streamable_http_app(
         server_middleware.extend(auth_middleware)
 
         # Auth is enabled, wrap endpoint with RequireAuthMiddleware
+        # Build the resource metadata URL
+        resource_metadata_url = AnyHttpUrl(
+            f"{str(auth.issuer_url).rstrip('/')}/.well-known/oauth-protected-resource"
+        )
+
         server_routes.append(
             Mount(
                 streamable_http_path,
-                app=RequireAuthMiddleware(handle_streamable_http, required_scopes),
+                app=RequireAuthMiddleware(
+                    handle_streamable_http,
+                    required_scopes,
+                    resource_metadata_url=resource_metadata_url,
+                ),
             )
         )
     else:

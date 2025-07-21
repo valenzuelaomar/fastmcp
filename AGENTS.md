@@ -65,3 +65,4 @@ While these have slightly different semantics and implementations, in general ch
 4. Make the smallest set of changes that achieve the desired outcome.
 5. Always read code before modifying it blindly.
 6. Follow established patterns and maintain consistency.
+7. Use `uv run --with pandas something.py` instead of `uv pip install pandas && uv run something.py` for one-offs.
