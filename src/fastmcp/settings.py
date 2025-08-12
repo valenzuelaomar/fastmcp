@@ -222,9 +222,9 @@ class Settings(BaseSettings):
     # HTTP settings
     host: str = "127.0.0.1"
     port: int = 8000
-    sse_path: str = "/sse/"
+    sse_path: str = "/sse"
     message_path: str = "/messages/"
-    streamable_http_path: str = "/mcp/"
+    streamable_http_path: str = "/mcp"
     debug: bool = False
 
     # error handling
@@ -244,13 +244,10 @@ class Settings(BaseSettings):
         ),
     ] = False
 
-    server_dependencies: Annotated[
-        list[str],
-        Field(
-            default_factory=list,
-            description="List of dependencies to install in the server environment",
-        ),
-    ] = []
+    server_dependencies: list[str] = Field(
+        default_factory=list,
+        description="List of dependencies to install in the server environment",
+    )
 
     # StreamableHTTP settings
     json_response: bool = False

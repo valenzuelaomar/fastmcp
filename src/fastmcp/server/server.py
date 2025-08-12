@@ -49,7 +49,7 @@ from fastmcp.prompts import Prompt, PromptManager
 from fastmcp.prompts.prompt import FunctionPrompt
 from fastmcp.resources import Resource, ResourceManager
 from fastmcp.resources.template import ResourceTemplate
-from fastmcp.server.auth.auth import AuthProvider
+from fastmcp.server.auth import AuthProvider
 from fastmcp.server.auth.registry import get_registered_provider
 from fastmcp.server.http import (
     StarletteWithLifespan,
@@ -140,19 +140,18 @@ class FastMCP(Generic[LifespanResultT]):
             ]
             | None
         ) = None,
-        tool_serializer: Callable[[Any], str] | None = None,
-        cache_expiration_seconds: float | None = None,
-        on_duplicate_tools: DuplicateBehavior | None = None,
-        on_duplicate_resources: DuplicateBehavior | None = None,
-        on_duplicate_prompts: DuplicateBehavior | None = None,
+        dependencies: list[str] | None = None,
         resource_prefix_format: Literal["protocol", "path"] | None = None,
         mask_error_details: bool | None = None,
         tools: list[Tool | Callable[..., Any]] | None = None,
         tool_transformations: dict[str, ToolTransformConfig] | None = None,
-        dependencies: list[str] | None = None,
+        tool_serializer: Callable[[Any], str] | None = None,
         include_tags: set[str] | None = None,
         exclude_tags: set[str] | None = None,
         include_fastmcp_meta: bool | None = None,
+        on_duplicate_tools: DuplicateBehavior | None = None,
+        on_duplicate_resources: DuplicateBehavior | None = None,
+        on_duplicate_prompts: DuplicateBehavior | None = None,
         # ---
         # ---
         # --- The following arguments are DEPRECATED ---
@@ -173,6 +172,7 @@ class FastMCP(Generic[LifespanResultT]):
         )
 
         self._additional_http_routes: list[BaseRoute] = []
+        self._mounted_servers: list[MountedServer] = []
         self._tool_manager = ToolManager(
             duplicate_behavior=on_duplicate_tools,
             mask_error_details=mask_error_details,
@@ -303,6 +303,10 @@ class FastMCP(Generic[LifespanResultT]):
     @property
     def instructions(self) -> str | None:
         return self._mcp_server.instructions
+
+    @property
+    def version(self) -> str | None:
+        return self._mcp_server.version
 
     async def run_async(
         self,
@@ -471,6 +475,24 @@ class FastMCP(Generic[LifespanResultT]):
             return fn
 
         return decorator
+
+    def _get_additional_http_routes(self) -> list[BaseRoute]:
+        """Get all additional HTTP routes including from mounted servers.
+
+        Returns a list of all custom HTTP routes from this server and
+        recursively from all mounted servers.
+
+        Returns:
+            List of Starlette BaseRoute objects
+        """
+        routes = list(self._additional_http_routes)
+
+        # Recursively get routes from mounted servers
+        for mounted_server in self._mounted_servers:
+            mounted_routes = mounted_server.server._get_additional_http_routes()
+            routes.extend(mounted_routes)
+
+        return routes
 
     async def _mcp_list_tools(self) -> list[MCPTool]:
         logger.debug("Handler called: list_tools")
@@ -1793,6 +1815,7 @@ class FastMCP(Generic[LifespanResultT]):
             server=server,
             resource_prefix_format=self.resource_prefix_format,
         )
+        self._mounted_servers.append(mounted_server)
         self._tool_manager.mount(mounted_server)
         self._resource_manager.mount(mounted_server)
         self._prompt_manager.mount(mounted_server)
@@ -1888,7 +1911,7 @@ class FastMCP(Generic[LifespanResultT]):
         # Import tools from the server
         for key, tool in (await server.get_tools()).items():
             if prefix:
-                tool = tool.with_key(f"{prefix}_{key}")
+                tool = tool.model_copy(key=f"{prefix}_{key}")
             self._tool_manager.add_tool(tool)
 
         # Import resources and templates from the server
@@ -1897,7 +1920,9 @@ class FastMCP(Generic[LifespanResultT]):
                 resource_key = add_resource_prefix(
                     key, prefix, self.resource_prefix_format
                 )
-                resource = resource.with_key(resource_key)
+                resource = resource.model_copy(
+                    update={"name": f"{prefix}_{resource.name}"}, key=resource_key
+                )
             self._resource_manager.add_resource(resource)
 
         for key, template in (await server.get_resource_templates()).items():
@@ -1905,13 +1930,15 @@ class FastMCP(Generic[LifespanResultT]):
                 template_key = add_resource_prefix(
                     key, prefix, self.resource_prefix_format
                 )
-                template = template.with_key(template_key)
+                template = template.model_copy(
+                    update={"name": f"{prefix}_{template.name}"}, key=template_key
+                )
             self._resource_manager.add_template(template)
 
         # Import prompts from the server
         for key, prompt in (await server.get_prompts()).items():
             if prefix:
-                prompt = prompt.with_key(f"{prefix}_{key}")
+                prompt = prompt.model_copy(key=f"{prefix}_{key}")
             self._prompt_manager.add_prompt(prompt)
 
         if prefix:
