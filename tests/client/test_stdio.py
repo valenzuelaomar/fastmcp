@@ -1,9 +1,22 @@
+import asyncio
+import gc
 import inspect
+import weakref
 
+import psutil
 import pytest
 
 from fastmcp import Client
 from fastmcp.client.transports import PythonStdioTransport, StdioTransport
+
+
+def gc_collect_harder():
+    gc.collect()
+    gc.collect()
+    gc.collect()
+    gc.collect()
+    gc.collect()
+    gc.collect()
 
 
 class TestKeepAlive:
@@ -55,6 +68,81 @@ class TestKeepAlive:
             pid2: int = result2.data
 
         assert pid1 == pid2
+
+    async def test_keep_alive_true_exit_scope_kills_transport(self, stdio_script):
+        transport_weak_ref: weakref.ref[PythonStdioTransport] | None = None
+
+        async def test_server():
+            transport = PythonStdioTransport(script_path=stdio_script, keep_alive=True)
+            nonlocal transport_weak_ref
+            transport_weak_ref = weakref.ref(transport)
+            async with transport.connect_session():
+                pass
+
+        await test_server()
+
+        gc_collect_harder()
+
+        assert transport_weak_ref
+        transport = transport_weak_ref()
+        assert transport is None
+
+    async def test_keep_alive_true_exit_scope_kills_client(self, stdio_script):
+        pid: int | None = None
+
+        transport_weak_ref: weakref.ref[PythonStdioTransport] | None = None
+        client_weak_ref: weakref.ref[Client] | None = None
+
+        async def test_server():
+            transport = PythonStdioTransport(script_path=stdio_script, keep_alive=True)
+            client = Client(transport=transport)
+
+            nonlocal client_weak_ref
+            client_weak_ref = weakref.ref(client)
+            nonlocal transport_weak_ref
+            transport_weak_ref = weakref.ref(transport)
+            assert client.transport.keep_alive is True
+
+            async with client:
+                result1 = await client.call_tool("pid")
+                nonlocal pid
+                pid = result1.data
+
+        await test_server()
+
+        gc_collect_harder()
+
+        await asyncio.sleep(1)
+
+        assert client_weak_ref
+        client = client_weak_ref()
+        assert client is None
+
+        assert transport_weak_ref
+        transport = transport_weak_ref()
+        assert transport is None
+
+        with pytest.raises(psutil.NoSuchProcess):
+            psutil.Process(pid)
+
+    async def test_keep_alive_false_exit_scope_kills_server(self, stdio_script):
+        pid: int | None = None
+
+        async def test_server():
+            transport = PythonStdioTransport(script_path=stdio_script, keep_alive=False)
+            client = Client(transport=transport)
+            assert client.transport.keep_alive is False
+            async with client:
+                result1 = await client.call_tool("pid")
+                nonlocal pid
+                pid = result1.data
+
+            del client
+
+        await test_server()
+
+        with pytest.raises(psutil.NoSuchProcess):
+            psutil.Process(pid)
 
     async def test_keep_alive_false_starts_new_session_across_multiple_calls(
         self, stdio_script

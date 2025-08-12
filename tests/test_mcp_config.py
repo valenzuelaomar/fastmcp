@@ -1,10 +1,14 @@
+import asyncio
+import gc
 import inspect
 import logging
 import tempfile
+import weakref
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 
 from fastmcp.client.auth.bearer import BearerAuth
@@ -12,6 +16,8 @@ from fastmcp.client.auth.oauth import OAuthClientProvider
 from fastmcp.client.client import Client
 from fastmcp.client.logging import LogMessage
 from fastmcp.client.transports import (
+    ClientTransport,
+    FastMCPTransport,
     MCPConfigTransport,
     SSETransport,
     StdioTransport,
@@ -26,7 +32,17 @@ from fastmcp.mcp_config import (
     StdioMCPServer,
     TransformingStdioMCPServer,
 )
+from fastmcp.server.server import FastMCP
 from fastmcp.tools.tool import Tool as FastMCPTool
+
+
+def gc_collect_harder():
+    gc.collect()
+    gc.collect()
+    gc.collect()
+    gc.collect()
+    gc.collect()
+    gc.collect()
 
 
 def test_parse_single_stdio_config():
@@ -223,6 +239,86 @@ async def test_multi_client(tmp_path: Path):
         result_2 = await client.call_tool("test_2_add", {"a": 1, "b": 2})
         assert result_1.data == 3
         assert result_2.data == 3
+
+
+async def test_multi_client_lifespan(tmp_path: Path):
+    server_script = inspect.cleandoc("""
+        from fastmcp import FastMCP
+        import os
+
+        mcp = FastMCP()
+
+        @mcp.tool
+        def pid() -> int:
+            return os.getpid()
+
+        if __name__ == '__main__':
+            mcp.run()
+        """)
+
+    script_path = tmp_path / "test.py"
+    script_path.write_text(server_script)
+
+    config = {
+        "mcpServers": {
+            "test_1": {
+                "command": "python",
+                "args": [str(script_path)],
+            },
+            "test_2": {
+                "command": "python",
+                "args": [str(script_path)],
+            },
+        }
+    }
+
+    pid: int | None = None
+
+    transport_weak_ref: weakref.ref[ClientTransport] | None = None
+    nested_transport_weak_ref: weakref.ref[ClientTransport] | None = None
+    client_weak_ref: weakref.ref[Client] | None = None
+    server_weak_ref: weakref.ref[FastMCP] | None = None
+
+    async def test_server():
+        transport = MCPConfigTransport(config)
+        client = Client(transport)
+        nonlocal client_weak_ref
+        client_weak_ref = weakref.ref(client)
+        nonlocal transport_weak_ref
+        transport_weak_ref = weakref.ref(transport)
+
+        nonlocal nested_transport_weak_ref
+        nested_transport_weak_ref = weakref.ref(transport.transport)
+        assert isinstance(transport.transport, FastMCPTransport)
+        nonlocal server_weak_ref
+        server_weak_ref = weakref.ref(transport.transport.server)
+
+        async with client:
+            nonlocal pid
+            pid = (await client.call_tool("test_1_pid")).data
+
+    await test_server()
+
+    gc_collect_harder()
+
+    await asyncio.sleep(1)
+
+    gc_collect_harder()
+
+    await asyncio.sleep(1)
+
+    assert client_weak_ref is not None
+    assert transport_weak_ref is not None
+    assert nested_transport_weak_ref is not None
+    assert server_weak_ref is not None
+
+    assert not client_weak_ref()
+    assert not transport_weak_ref()
+    assert not nested_transport_weak_ref()
+    assert not server_weak_ref()
+
+    with pytest.raises(psutil.NoSuchProcess):
+        psutil.Process(pid)
 
 
 async def test_remote_config_default_no_auth():
