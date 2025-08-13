@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import inspect
+import os
 import weakref
 
 import psutil
@@ -8,6 +9,10 @@ import pytest
 
 from fastmcp import Client
 from fastmcp.client.transports import PythonStdioTransport, StdioTransport
+
+
+def running_under_debugger():
+    return os.environ.get("DEBUGPY_RUNNING") == "true"
 
 
 def gc_collect_harder():
@@ -69,6 +74,9 @@ class TestKeepAlive:
 
         assert pid1 == pid2
 
+    @pytest.mark.skipif(
+        running_under_debugger(), reason="Debugger holds a reference to the transport"
+    )
     async def test_keep_alive_true_exit_scope_kills_transport(self, stdio_script):
         transport_weak_ref: weakref.ref[PythonStdioTransport] | None = None
 
@@ -83,12 +91,14 @@ class TestKeepAlive:
 
         gc_collect_harder()
 
-        # When debugging, the debugger holds extra references so this test
-        # will pass when running and fail under the debugger.
+        # This test will fail while debugging because the debugger holds a reference to the underlying transport
         assert transport_weak_ref
         transport = transport_weak_ref()
         assert transport is None
 
+    @pytest.mark.skipif(
+        running_under_debugger(), reason="Debugger holds a reference to the transport"
+    )
     async def test_keep_alive_true_exit_scope_kills_client(self, stdio_script):
         pid: int | None = None
 
@@ -106,6 +116,8 @@ class TestKeepAlive:
         await test_server()
 
         gc_collect_harder()
+
+        # This test may fail/hang while debugging because the debugger holds a reference to the underlying transport
 
         with pytest.raises(psutil.NoSuchProcess):
             while True:

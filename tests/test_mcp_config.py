@@ -2,6 +2,7 @@ import asyncio
 import gc
 import inspect
 import logging
+import os
 import tempfile
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -30,6 +31,10 @@ from fastmcp.mcp_config import (
     TransformingStdioMCPServer,
 )
 from fastmcp.tools.tool import Tool as FastMCPTool
+
+
+def running_under_debugger():
+    return os.environ.get("DEBUGPY_RUNNING") == "true"
 
 
 def gc_collect_harder():
@@ -237,6 +242,9 @@ async def test_multi_client(tmp_path: Path):
         assert result_2.data == 3
 
 
+@pytest.mark.skipif(
+    running_under_debugger(), reason="Debugger holds a reference to the transport"
+)
 async def test_multi_client_lifespan(tmp_path: Path):
     pid_1: int | None = None
     pid_2: int | None = None
@@ -285,6 +293,8 @@ async def test_multi_client_lifespan(tmp_path: Path):
 
     gc_collect_harder()
 
+    # This test will fail while debugging because the debugger holds a reference to the underlying transport
+
     with pytest.raises(psutil.NoSuchProcess):
         while True:
             psutil.Process(pid_1)
@@ -294,6 +304,7 @@ async def test_multi_client_lifespan(tmp_path: Path):
         while True:
             psutil.Process(pid_2)
             await asyncio.sleep(0.1)
+
 
 async def test_multi_client_force_close(tmp_path: Path):
     server_script = inspect.cleandoc("""
