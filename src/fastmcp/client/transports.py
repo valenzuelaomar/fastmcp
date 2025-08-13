@@ -298,12 +298,15 @@ class StreamableHttpTransport(ClientTransport):
         return f"<StreamableHttpTransport(url='{self.url}')>"
 
 
-class StdioTransport(ClientTransport):
+class StdioTransport(ClientTransport, anyio.AsyncContextManagerMixin):
     """
     Base transport for connecting to an MCP server via subprocess with stdio.
 
     This is a base class that can be subclassed for specific command-based
     transports like Python, Node, Uvx, etc.
+    
+    Uses AnyIO's AsyncContextManagerMixin for improved resource management
+    and more reliable startup/shutdown cleanup logic.
     """
 
     def __init__(
@@ -335,93 +338,77 @@ class StdioTransport(ClientTransport):
             keep_alive = True
         self.keep_alive = keep_alive
 
+        # Connection state - simplified with AsyncContextManagerMixin
         self._session: ClientSession | None = None
-        self._connect_task: asyncio.Task | None = None
-        self._ready_event = anyio.Event()
-        self._stop_event = anyio.Event()
+        self._exit_stack: contextlib.AsyncExitStack | None = None
+        self._connection_active = False
 
     @contextlib.asynccontextmanager
     async def connect_session(
         self, **session_kwargs: Unpack[SessionKwargs]
     ) -> AsyncIterator[ClientSession]:
-        try:
-            await self.connect(**session_kwargs)
+        if not self._connection_active:
+            # Use the mixin's context manager for reliable cleanup
+            async with self:
+                await self._ensure_connected(**session_kwargs)
+                assert self._session is not None
+                yield self._session
+        else:
+            # Already connected, just yield the session
             assert self._session is not None
             yield self._session
-        finally:
-            if not self.keep_alive:
-                await self.disconnect()
-            else:
-                logger.debug("Stdio transport has keep_alive=True, not disconnecting")
 
-    async def connect(
-        self, **session_kwargs: Unpack[SessionKwargs]
-    ) -> ClientSession | None:
-        if self._connect_task is not None:
-            return
+    async def _aenter(self) -> "StdioTransport":
+        """Enter the async context manager - start the connection."""
+        if self._connection_active:
+            return self
+            
+        self._exit_stack = contextlib.AsyncExitStack()
+        await self._exit_stack.__aenter__()
+        self._connection_active = True
+        logger.debug("Stdio transport context entered")
+        return self
 
-        async def _connect_task():
+    async def _aexit__(self, exc_type, exc_val, exc_tb):
+        """Exit the async context manager - clean up the connection."""
+        if not self.keep_alive or exc_type is not None:
+            await self._cleanup()
+
+    async def _ensure_connected(self, **session_kwargs: Unpack[SessionKwargs]):
+        """Ensure we have an active session with the given kwargs."""
+        if self._session is None and self._exit_stack is not None:
             from mcp.client.stdio import stdio_client
 
-            try:
-                async with contextlib.AsyncExitStack() as stack:
-                    try:
-                        server_params = StdioServerParameters(
-                            command=self.command,
-                            args=self.args,
-                            env=self.env,
-                            cwd=self.cwd,
-                        )
-                        transport = await stack.enter_async_context(
-                            stdio_client(server_params)
-                        )
-                        read_stream, write_stream = transport
-                        self._session = await stack.enter_async_context(
-                            ClientSession(read_stream, write_stream, **session_kwargs)
-                        )
+            server_params = StdioServerParameters(
+                command=self.command,
+                args=self.args,
+                env=self.env,
+                cwd=self.cwd,
+            )
+            
+            transport = await self._exit_stack.enter_async_context(
+                stdio_client(server_params)
+            )
+            read_stream, write_stream = transport
+            
+            self._session = await self._exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream, **session_kwargs)
+            )
+            logger.debug("Stdio transport session created")
 
-                        logger.debug("Stdio transport connected")
-                        self._ready_event.set()
-
-                        # Wait until disconnect is requested (stop_event is set)
-                        await self._stop_event.wait()
-                    finally:
-                        # Clean up client on exit
-                        self._session = None
-                        logger.debug("Stdio transport disconnected")
-            except Exception:
-                # Ensure ready event is set even if connection fails
-                self._ready_event.set()
-                raise
-
-        # start the connection task
-        self._connect_task = asyncio.create_task(_connect_task())
-        # wait for the client to be ready before returning
-        await self._ready_event.wait()
-
-        # Check if connect task completed with an exception (early failure)
-        if self._connect_task.done():
-            exception = self._connect_task.exception()
-            if exception is not None:
-                raise exception
-
-    async def disconnect(self):
-        if self._connect_task is None:
-            return
-
-        # signal the connection task to stop
-        self._stop_event.set()
-
-        # wait for the connection task to finish cleanly
-        await self._connect_task
-
-        # reset variables and events for potential future reconnects
-        self._connect_task = None
-        self._stop_event = anyio.Event()
-        self._ready_event = anyio.Event()
+    async def _cleanup(self):
+        """Clean up all resources."""
+        self._connection_active = False
+        self._session = None
+        
+        if self._exit_stack is not None:
+            await self._exit_stack.__aexit__(None, None, None)
+            self._exit_stack = None
+            logger.debug("Stdio transport disconnected")
 
     async def close(self):
-        await self.disconnect()
+        """Explicitly close the transport."""
+        await self._cleanup()
 
     def __repr__(self) -> str:
         return (
