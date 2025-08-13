@@ -32,7 +32,7 @@ def mcp_server_type_to_servers_and_transports(
     transport: ClientTransport
 
     if isinstance(mcp_server, TransformingRemoteMCPServer | TransformingStdioMCPServer):
-        server, transport = mcp_server._to_server_and_transport()
+        server, transport = mcp_server._to_server_and_underlying_transport()
     else:
         transport = mcp_server.to_transport()
         server = FastMCP.as_proxy(backend=transport)

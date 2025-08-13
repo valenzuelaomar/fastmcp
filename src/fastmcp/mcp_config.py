@@ -90,10 +90,10 @@ class _TransformingMCPServerMixin(FastMCPBaseModel):
         description="The tags to exclude in the proxy.",
     )
 
-    def _to_server_and_transport(
+    def _to_server_and_underlying_transport(
         self,
     ) -> tuple[FastMCP[Any], ClientTransport]:
-        """Get the server and transport for the server."""
+        """Turn the Transforming MCPServer into a FastMCP Server and also return the underlying transport."""
         from fastmcp import FastMCP
 
         transport: ClientTransport = super().to_transport()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
@@ -108,8 +108,10 @@ class _TransformingMCPServerMixin(FastMCPBaseModel):
         return wrapped_mcp_server, transport
 
     def to_transport(self) -> ClientTransport:
-        """Get the transport for the server."""
-        return self._to_server_and_transport()[1]
+        """Get the transport for the transforming MCP server."""
+        from fastmcp.client.transports import FastMCPTransport
+
+        return FastMCPTransport(mcp=self._to_server_and_underlying_transport()[0])
 
 
 class StdioMCPServer(BaseModel):

@@ -879,7 +879,7 @@ class MCPConfigTransport(ClientTransport):
         # if there's exactly one server, create a client for that server
         elif len(self.config.mcpServers) == 1:
             self.transport = list(self.config.mcpServers.values())[0].to_transport()
-            self._underlying_transport = self.transport
+            self._underlying_transports.append(self.transport)
 
         # otherwise create a composite client
         else:
