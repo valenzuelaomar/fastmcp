@@ -47,11 +47,11 @@ from fastmcp.utilities.types import FastMCPBaseModel
 if TYPE_CHECKING:
     from fastmcp.client.transports import (
         ClientTransport,
-        FastMCPTransport,
         SSETransport,
         StdioTransport,
         StreamableHttpTransport,
     )
+    from fastmcp.server.server import FastMCP
 
 
 def infer_transport_type_from_url(
@@ -90,10 +90,11 @@ class _TransformingMCPServerMixin(FastMCPBaseModel):
         description="The tags to exclude in the proxy.",
     )
 
-    def to_transport(self) -> FastMCPTransport:
-        """Get the transport for the server."""
-        from fastmcp.client.transports import FastMCPTransport
-        from fastmcp.server.server import FastMCP
+    def _to_server_and_transport(
+        self,
+    ) -> tuple[FastMCP[Any], ClientTransport]:
+        """Get the server and transport for the server."""
+        from fastmcp import FastMCP
 
         transport: ClientTransport = super().to_transport()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
 
@@ -104,7 +105,11 @@ class _TransformingMCPServerMixin(FastMCPBaseModel):
             exclude_tags=self.exclude_tags,
         )
 
-        return FastMCPTransport(wrapped_mcp_server)
+        return wrapped_mcp_server, transport
+
+    def to_transport(self) -> ClientTransport:
+        """Get the transport for the server."""
+        return self._to_server_and_transport()[1]
 
 
 class StdioMCPServer(BaseModel):

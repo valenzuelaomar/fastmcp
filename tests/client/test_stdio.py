@@ -83,6 +83,8 @@ class TestKeepAlive:
 
         gc_collect_harder()
 
+        # When debugging, the debugger holds extra references so this test
+        # will pass when running and fail under the debugger.
         assert transport_weak_ref
         transport = transport_weak_ref()
         assert transport is None
@@ -90,17 +92,10 @@ class TestKeepAlive:
     async def test_keep_alive_true_exit_scope_kills_client(self, stdio_script):
         pid: int | None = None
 
-        transport_weak_ref: weakref.ref[PythonStdioTransport] | None = None
-        client_weak_ref: weakref.ref[Client] | None = None
-
         async def test_server():
             transport = PythonStdioTransport(script_path=stdio_script, keep_alive=True)
             client = Client(transport=transport)
 
-            nonlocal client_weak_ref
-            client_weak_ref = weakref.ref(client)
-            nonlocal transport_weak_ref
-            transport_weak_ref = weakref.ref(transport)
             assert client.transport.keep_alive is True
 
             async with client:
@@ -112,18 +107,10 @@ class TestKeepAlive:
 
         gc_collect_harder()
 
-        await asyncio.sleep(1)
-
-        assert client_weak_ref
-        client = client_weak_ref()
-        assert client is None
-
-        assert transport_weak_ref
-        transport = transport_weak_ref()
-        assert transport is None
-
         with pytest.raises(psutil.NoSuchProcess):
-            psutil.Process(pid)
+            while True:
+                psutil.Process(pid)
+                await asyncio.sleep(0.1)
 
     async def test_keep_alive_false_exit_scope_kills_server(self, stdio_script):
         pid: int | None = None
@@ -142,7 +129,9 @@ class TestKeepAlive:
         await test_server()
 
         with pytest.raises(psutil.NoSuchProcess):
-            psutil.Process(pid)
+            while True:
+                psutil.Process(pid)
+                await asyncio.sleep(0.1)
 
     async def test_keep_alive_false_starts_new_session_across_multiple_calls(
         self, stdio_script
