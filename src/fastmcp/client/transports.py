@@ -6,9 +6,10 @@ import os
 import shutil
 import sys
 import warnings
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal, TypeVar, cast, overload
+from typing import Any, Literal, Self, TypeVar, cast, overload
 
 import anyio
 import httpx
@@ -343,36 +344,36 @@ class StdioTransport(ClientTransport, anyio.AsyncContextManagerMixin):
         self._exit_stack: contextlib.AsyncExitStack | None = None
         self._connection_active = False
 
-    @contextlib.asynccontextmanager
-    async def connect_session(
-        self, **session_kwargs: Unpack[SessionKwargs]
-    ) -> AsyncIterator[ClientSession]:
-        if not self._connection_active:
-            # Use the mixin's context manager for reliable cleanup
-            async with self:
-                await self._ensure_connected(**session_kwargs)
-                assert self._session is not None
-                yield self._session
-        else:
-            # Already connected, just yield the session
-            assert self._session is not None
-            yield self._session
-
-    async def _aenter(self) -> "StdioTransport":
-        """Enter the async context manager - start the connection."""
+    @asynccontextmanager
+    async def __asynccontextmanager__(self) -> AsyncGenerator[Self]:
+        """The async context manager implementation for AnyIO mixin."""
         if self._connection_active:
-            return self
+            # Already in context, just yield self without re-entering
+            yield self
+            return
             
+        # Enter the context - setup resources
         self._exit_stack = contextlib.AsyncExitStack()
         await self._exit_stack.__aenter__()
         self._connection_active = True
         logger.debug("Stdio transport context entered")
-        return self
+        
+        try:
+            yield self
+        finally:
+            # Exit the context - cleanup resources
+            if not self.keep_alive:
+                await self._cleanup()
 
-    async def _aexit__(self, exc_type, exc_val, exc_tb):
-        """Exit the async context manager - clean up the connection."""
-        if not self.keep_alive or exc_type is not None:
-            await self._cleanup()
+    @contextlib.asynccontextmanager
+    async def connect_session(
+        self, **session_kwargs: Unpack[SessionKwargs]
+    ) -> AsyncIterator[ClientSession]:
+        # Use the AsyncContextManagerMixin - this will call __asynccontextmanager__
+        async with self:
+            await self._ensure_connected(**session_kwargs)
+            assert self._session is not None
+            yield self._session
 
     async def _ensure_connected(self, **session_kwargs: Unpack[SessionKwargs]):
         """Ensure we have an active session with the given kwargs."""
@@ -396,13 +397,13 @@ class StdioTransport(ClientTransport, anyio.AsyncContextManagerMixin):
             )
             logger.debug("Stdio transport session created")
 
-    async def _cleanup(self):
+    async def _cleanup(self, exc_type=None, exc_val=None, exc_tb=None):
         """Clean up all resources."""
         self._connection_active = False
         self._session = None
         
         if self._exit_stack is not None:
-            await self._exit_stack.__aexit__(None, None, None)
+            await self._exit_stack.__aexit__(exc_type, exc_val, exc_tb)
             self._exit_stack = None
             logger.debug("Stdio transport disconnected")
 
