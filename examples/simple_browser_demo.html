@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FastMCP Browser Demo - Simple Example</title>
+    <link rel="stylesheet" href="https://pyscript.net/releases/2024.12.1/core.css">
+    <script type="module" src="https://pyscript.net/releases/2024.12.1/core.js"></script>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            max-width: 800px; 
+            margin: 0 auto; 
+            padding: 20px; 
+            line-height: 1.6;
+        }
+        .header { 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            color: white; 
+            padding: 30px; 
+            border-radius: 12px; 
+            text-align: center; 
+            margin-bottom: 30px; 
+        }
+        .demo-card { 
+            background: white; 
+            border: 1px solid #e0e0e0; 
+            border-radius: 8px; 
+            padding: 20px; 
+            margin-bottom: 20px; 
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1); 
+        }
+        .output { 
+            background: #f8f9fa; 
+            border-left: 4px solid #007bff; 
+            padding: 15px; 
+            margin: 15px 0; 
+            font-family: 'SF Mono', Monaco, monospace; 
+            font-size: 14px; 
+            white-space: pre-wrap; 
+            border-radius: 4px;
+        }
+        .btn { 
+            background: #007bff; 
+            color: white; 
+            border: none; 
+            padding: 10px 20px; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            margin: 8px 8px 8px 0; 
+            font-size: 14px; 
+            transition: all 0.2s;
+        }
+        .btn:hover { background: #0056b3; transform: translateY(-1px); }
+        .btn:active { transform: translateY(0); }
+        .success { color: #28a745; }
+        .error { color: #dc3545; }
+        .info { color: #17a2b8; }
+        .sample-content { 
+            background: #e3f2fd; 
+            padding: 20px; 
+            border-radius: 8px; 
+            margin: 15px 0; 
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌐 FastMCP + PyScript</h1>
+        <p>Browser-based MCP Server Demo</p>
+        <p><small>Making web content accessible to LLMs through the Model Context Protocol</small></p>
+    </div>
+
+    <div class="demo-card">
+        <h2>🎯 Use Case: Chatbot Web Integration</h2>
+        <p>This demonstrates how a chatbot integrated into a web application can access page content, user session data, and make authenticated API calls using FastMCP.</p>
+        
+        <div class="sample-content" id="web-content">
+            <h3>📄 Sample Web Application Content</h3>
+            <p><strong>User:</strong> <span id="username">john.doe@example.com</span></p>
+            <p><strong>Current Page:</strong> Dashboard</p>
+            <p><strong>Last Updated:</strong> <span id="timestamp">Loading...</span></p>
+            <p><strong>Session ID:</strong> <span id="session-id">abc123def456</span></p>
+            <div>
+                <label>Theme: </label>
+                <select id="theme-selector">
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <div class="demo-card">
+        <h2>🛠 MCP Tools Demo</h2>
+        <p>Click buttons below to test MCP tools that can access web page content:</p>
+        
+        <button class="btn" py-click="demo_page_reading">📖 Read Page Content</button>
+        <button class="btn" py-click="demo_user_context">👤 Get User Context</button>
+        <button class="btn" py-click="demo_form_data">📝 Extract Form Data</button>
+        <button class="btn" py-click="demo_api_simulation">🌐 Simulate API Call</button>
+        <button class="btn" py-click="demo_update_content">✏️ Update Page Element</button>
+        
+        <div id="tool-output" class="output">FastMCP tools ready. Click buttons above to test functionality.</div>
+    </div>
+
+    <div class="demo-card">
+        <h2>💡 How This Enables LLM Context</h2>
+        <ul>
+            <li><strong>Page Awareness:</strong> LLM can understand what user is currently viewing</li>
+            <li><strong>Session Context:</strong> Access to user preferences, authentication state</li>
+            <li><strong>Form Interaction:</strong> Can help fill forms or validate user input</li>
+            <li><strong>API Access:</strong> Make authenticated requests using user's cookies</li>
+            <li><strong>Dynamic Updates:</strong> Modify page content based on conversation</li>
+        </ul>
+    </div>
+
+    <py-config>
+        packages = []
+    </py-config>
+
+    <py-script>
+import asyncio
+from js import document, console, JSON, fetch, Date
+import json
+import time
+from pyodide.ffi import create_proxy
+
+# Lightweight FastMCP implementation for browser
+class BrowserMCP:
+    def __init__(self, name: str):
+        self.name = name
+        self.tools = {}
+        
+    def tool(self, func):
+        """Register a tool function"""
+        self.tools[func.__name__] = func
+        return func
+        
+    async def call_tool(self, name: str, **kwargs):
+        """Call a registered tool"""
+        if name in self.tools:
+            try:
+                return await self.tools[name](**kwargs)
+            except Exception as e:
+                return f"Error in tool {name}: {str(e)}"
+        else:
+            return f"Tool {name} not found"
+
+# Create MCP server
+mcp = BrowserMCP("Web Context Server")
+
+@mcp.tool
+async def read_page_content(selector: str = "body") -> dict:
+    """Read content from the current web page"""
+    try:
+        if selector == "body":
+            title = document.title
+            url = document.location.href
+            text_content = document.body.textContent[:500]  # Limit content
+            return {
+                "title": title,
+                "url": url,
+                "content_preview": text_content,
+                "success": True
+            }
+        else:
+            element = document.querySelector(selector)
+            if element:
+                return {
+                    "selector": selector,
+                    "content": element.textContent,
+                    "html": element.innerHTML,
+                    "success": True
+                }
+            else:
+                return {"error": f"Element not found: {selector}", "success": False}
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+@mcp.tool
+async def get_user_context() -> dict:
+    """Extract user context from the current page"""
+    try:
+        username = document.getElementById("username").textContent if document.getElementById("username") else "Unknown"
+        session_id = document.getElementById("session-id").textContent if document.getElementById("session-id") else "None"
+        theme = document.getElementById("theme-selector").value if document.getElementById("theme-selector") else "light"
+        
+        return {
+            "username": username,
+            "session_id": session_id,
+            "theme": theme,
+            "page_title": document.title,
+            "url": document.location.href,
+            "user_agent": document.navigator.userAgent,
+            "timestamp": Date.new().toISOString(),
+            "success": True
+        }
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+@mcp.tool  
+async def extract_form_data() -> dict:
+    """Extract data from forms on the page"""
+    try:
+        form_data = {}
+        
+        # Get theme selector
+        theme_selector = document.getElementById("theme-selector")
+        if theme_selector:
+            form_data["theme"] = theme_selector.value
+            
+        # Get any input elements
+        inputs = document.querySelectorAll("input")
+        for i in range(inputs.length):
+            input_elem = inputs[i]
+            if input_elem.name:
+                form_data[input_elem.name] = input_elem.value
+                
+        return {
+            "form_data": form_data,
+            "form_count": len(form_data),
+            "success": True
+        }
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+@mcp.tool
+async def simulate_api_call(endpoint: str = "/api/user/profile") -> dict:
+    """Simulate making an authenticated API call"""
+    try:
+        # In real implementation, this would use:
+        # response = await fetch(endpoint, {"credentials": "include"})
+        # For demo, we simulate the response
+        
+        simulated_response = {
+            "endpoint": endpoint,
+            "method": "GET",
+            "status": 200,
+            "data": {
+                "user_id": "12345",
+                "email": "john.doe@example.com",
+                "preferences": {
+                    "theme": "light",
+                    "notifications": True
+                },
+                "last_login": "2024-01-15T10:30:00Z"
+            },
+            "cookies_included": True,
+            "success": True
+        }
+        
+        return simulated_response
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+@mcp.tool
+async def update_page_element(element_id: str, new_content: str) -> dict:
+    """Update content of a page element"""
+    try:
+        element = document.getElementById(element_id)
+        if element:
+            element.textContent = new_content
+            return {
+                "element_id": element_id,
+                "new_content": new_content,
+                "success": True
+            }
+        else:
+            return {"error": f"Element with ID '{element_id}' not found", "success": False}
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+def log_output(message):
+    """Helper to display output"""
+    output_elem = document.getElementById("tool-output")
+    if isinstance(message, dict):
+        message = json.dumps(message, indent=2)
+    output_elem.textContent = str(message)
+
+async def demo_page_reading():
+    """Demo reading page content"""
+    result = await mcp.call_tool("read_page_content")
+    log_output(f"📖 Page Content Tool Result:\n{json.dumps(result, indent=2)}")
+
+async def demo_user_context():
+    """Demo getting user context"""
+    result = await mcp.call_tool("get_user_context")
+    log_output(f"👤 User Context Tool Result:\n{json.dumps(result, indent=2)}")
+
+async def demo_form_data():
+    """Demo extracting form data"""
+    result = await mcp.call_tool("extract_form_data")
+    log_output(f"📝 Form Data Tool Result:\n{json.dumps(result, indent=2)}")
+
+async def demo_api_simulation():
+    """Demo API call simulation"""
+    result = await mcp.call_tool("simulate_api_call", endpoint="/api/dashboard/stats")
+    log_output(f"🌐 API Call Tool Result:\n{json.dumps(result, indent=2)}")
+
+async def demo_update_content():
+    """Demo updating page content"""
+    new_time = Date.new().toLocaleTimeString()
+    result = await mcp.call_tool("update_page_element", element_id="timestamp", new_content=new_time)
+    log_output(f"✏️ Update Content Tool Result:\n{json.dumps(result, indent=2)}")
+
+# Create proxies for event handlers
+demo_page_reading_proxy = create_proxy(demo_page_reading)
+demo_user_context_proxy = create_proxy(demo_user_context) 
+demo_form_data_proxy = create_proxy(demo_form_data)
+demo_api_simulation_proxy = create_proxy(demo_api_simulation)
+demo_update_content_proxy = create_proxy(demo_update_content)
+
+# Make functions available globally
+globals()['demo_page_reading'] = demo_page_reading_proxy
+globals()['demo_user_context'] = demo_user_context_proxy
+globals()['demo_form_data'] = demo_form_data_proxy
+globals()['demo_api_simulation'] = demo_api_simulation_proxy
+globals()['demo_update_content'] = demo_update_content_proxy
+
+# Initialize
+def update_timestamp():
+    timestamp_elem = document.getElementById("timestamp")
+    if timestamp_elem:
+        timestamp_elem.textContent = Date.new().toLocaleString()
+
+update_timestamp()
+console.log("FastMCP Browser Demo initialized successfully!")
+    </py-script>
+
+    <script>
+        // Update timestamp periodically
+        setInterval(() => {
+            const timestampElem = document.getElementById('timestamp');
+            if (timestampElem) {
+                timestampElem.textContent = new Date().toLocaleString();
+            }
+        }, 1000);
+    </script>
+</body>
+</html>
