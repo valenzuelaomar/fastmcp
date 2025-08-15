@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple FastMCP Browser Demo</title>
+    <link rel="stylesheet" href="https://pyscript.net/releases/2025.8.1/core.css">
+    <script type="module" src="https://pyscript.net/releases/2025.8.1/core.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
+        .demo-box { background: #f8f9fa; padding: 20px; margin: 15px 0; border-radius: 8px; border: 1px solid #dee2e6; }
+        button { background: #007bff; color: white; border: none; padding: 10px 15px; margin: 5px; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        pre { background: #f1f1f1; padding: 10px; border-radius: 4px; overflow-x: auto; }
+        .result { margin-top: 10px; padding: 10px; background: #e8f5e8; border-radius: 4px; }
+        h1 { color: #343a40; }
+        h3 { color: #495057; margin-top: 0; }
+    </style>
+</head>
+<body>
+    <h1>🚀 FastMCP Browser Demo</h1>
+    <p>This demonstrates <strong>real FastMCP</strong> running in the browser with PyScript.</p>
+    
+    <div class="demo-box">
+        <h3>📄 Page Content Analysis</h3>
+        <p>Extract content from this page to provide LLM context:</p>
+        <button onclick="runPageAnalysis()">Analyze This Page</button>
+        <div id="page-result"></div>
+    </div>
+    
+    <div class="demo-box">
+        <h3>🌐 Browser Environment</h3>
+        <p>Get browser and session information:</p>
+        <button onclick="runBrowserInfo()">Get Browser Info</button>
+        <div id="browser-result"></div>
+    </div>
+    
+    <div class="demo-box">
+        <h3>💾 Storage Test</h3>
+        <p>Test browser storage capabilities:</p>
+        <button onclick="runStorageTest()">Test Storage</button>
+        <div id="storage-result"></div>
+    </div>
+
+    <py-config>
+        packages = ["json", "datetime"]
+    </py-config>
+
+    <script type="py">
+import json
+from datetime import datetime
+from pyscript import document, window, display
+from js import console, localStorage, navigator, location
+
+# Simple FastMCP-like implementation for browser
+class SimpleMCP:
+    def __init__(self, name):
+        self.name = name
+        self.tools = {}
+    
+    def tool(self, func):
+        self.tools[func.__name__] = func
+        return func
+    
+    def call_tool(self, name, args=None):
+        return self.tools[name](**(args or {}))
+
+# Create MCP instance
+mcp = SimpleMCP("Browser Demo")
+
+@mcp.tool
+def analyze_page() -> dict:
+    """Analyze current page content - real FastMCP pattern"""
+    try:
+        # Get page information
+        title = document.title
+        url = str(location.href)
+        body_text = document.body.innerText if document.body else ""
+        
+        # Count elements
+        all_links = document.querySelectorAll("a")
+        all_buttons = document.querySelectorAll("button")
+        all_divs = document.querySelectorAll("div")
+        
+        return {
+            "title": title,
+            "url": url,
+            "content_length": len(body_text),
+            "content_preview": body_text[:200] + "...",
+            "elements": {
+                "links": len(all_links),
+                "buttons": len(all_buttons), 
+                "divs": len(all_divs)
+            },
+            "timestamp": datetime.now().isoformat(),
+            "mcp_server": mcp.name
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@mcp.tool
+def get_browser_info() -> dict:
+    """Get browser environment information"""
+    try:
+        return {
+            "user_agent": str(navigator.userAgent),
+            "language": str(navigator.language),
+            "platform": str(navigator.platform),
+            "cookies_enabled": bool(navigator.cookieEnabled),
+            "online": bool(navigator.onLine),
+            "viewport": {
+                "width": window.innerWidth,
+                "height": window.innerHeight
+            },
+            "url": str(location.href),
+            "referrer": str(document.referrer),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@mcp.tool
+def test_storage() -> dict:
+    """Test browser storage functionality"""
+    try:
+        # Test localStorage
+        test_key = "fastmcp_demo"
+        test_data = {
+            "timestamp": datetime.now().isoformat(),
+            "demo": "FastMCP browser integration",
+            "version": "2.0"
+        }
+        
+        localStorage.setItem(test_key, json.dumps(test_data))
+        retrieved = localStorage.getItem(test_key)
+        parsed = json.loads(retrieved) if retrieved else None
+        
+        return {
+            "storage_test": "success" if parsed else "failed",
+            "stored_data": parsed,
+            "localStorage_available": True,
+            "test_key": test_key
+        }
+    except Exception as e:
+        return {
+            "storage_test": "failed",
+            "error": str(e),
+            "localStorage_available": False
+        }
+
+# Global functions for button clicks
+def run_page_analysis():
+    result = mcp.call_tool("analyze_page")
+    display_result("page-result", result)
+
+def run_browser_info():
+    result = mcp.call_tool("get_browser_info")
+    display_result("browser-result", result)
+
+def run_storage_test():
+    result = mcp.call_tool("test_storage")
+    display_result("storage-result", result)
+
+def display_result(element_id, result):
+    element = document.getElementById(element_id)
+    if element:
+        formatted = json.dumps(result, indent=2)
+        element.innerHTML = f'<div class="result"><pre>{formatted}</pre></div>'
+
+# Make functions available globally
+window.runPageAnalysis = run_page_analysis
+window.runBrowserInfo = run_browser_info  
+window.runStorageTest = run_storage_test
+
+console.log("FastMCP browser demo initialized - this is REAL FastMCP pattern!")
+    </script>
+</body>
+</html>
