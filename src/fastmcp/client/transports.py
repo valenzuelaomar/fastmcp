@@ -6,28 +6,34 @@ import os
 import shutil
 import sys
 import warnings
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, Literal, TypedDict, TypeVar, cast, overload
-from urllib.parse import urlparse, urlunparse
+from typing import Any, Literal, TypeVar, cast, overload
 
 import anyio
 import httpx
 import mcp.types
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.session import ListRootsFnT, LoggingFnT, MessageHandlerFnT, SamplingFnT
+from mcp.client.session import (
+    ElicitationFnT,
+    ListRootsFnT,
+    LoggingFnT,
+    MessageHandlerFnT,
+    SamplingFnT,
+)
 from mcp.server.fastmcp import FastMCP as FastMCP1Server
+from mcp.shared._httpx_utils import McpHttpClientFactory
 from mcp.shared.memory import create_client_server_memory_streams
 from pydantic import AnyUrl
-from typing_extensions import Unpack
+from typing_extensions import TypedDict, Unpack
 
 import fastmcp
 from fastmcp.client.auth.bearer import BearerAuth
 from fastmcp.client.auth.oauth import OAuth
+from fastmcp.mcp_config import MCPConfig, infer_transport_type_from_url
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.server import FastMCP
 from fastmcp.utilities.logging import get_logger
-from fastmcp.utilities.mcp_config import MCPConfig, infer_transport_type_from_url
 
 logger = get_logger(__name__)
 
@@ -43,6 +49,7 @@ __all__ = [
     "FastMCPStdioTransport",
     "NodeStdioTransport",
     "UvxStdioTransport",
+    "UvStdioTransport",
     "NpxStdioTransport",
     "FastMCPTransport",
     "infer_transport",
@@ -56,6 +63,7 @@ class SessionKwargs(TypedDict, total=False):
     sampling_callback: SamplingFnT | None
     list_roots_callback: ListRootsFnT | None
     logging_callback: LoggingFnT | None
+    elicitation_callback: ElicitationFnT | None
     message_handler: MessageHandlerFnT | None
     client_info: mcp.types.Implementation | None
 
@@ -154,18 +162,15 @@ class SSETransport(ClientTransport):
         headers: dict[str, str] | None = None,
         auth: httpx.Auth | Literal["oauth"] | str | None = None,
         sse_read_timeout: datetime.timedelta | float | int | None = None,
-        httpx_client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        httpx_client_factory: McpHttpClientFactory | None = None,
     ):
         if isinstance(url, AnyUrl):
             url = str(url)
         if not isinstance(url, str) or not url.startswith("http"):
             raise ValueError("Invalid HTTP/S URL provided for SSE.")
 
-        # Ensure the URL path ends with a trailing slash to avoid automatic redirects
-        parsed = urlparse(url)
-        if not parsed.path.endswith("/"):
-            parsed = parsed._replace(path=parsed.path + "/")
-            url = urlunparse(parsed)
+        # Don't modify the URL path - respect the exact URL provided by the user
+        # Some servers are strict about trailing slashes (e.g., PayPal MCP)
 
         self.url = url
         self.headers = headers or {}
@@ -229,18 +234,15 @@ class StreamableHttpTransport(ClientTransport):
         headers: dict[str, str] | None = None,
         auth: httpx.Auth | Literal["oauth"] | str | None = None,
         sse_read_timeout: datetime.timedelta | float | int | None = None,
-        httpx_client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        httpx_client_factory: McpHttpClientFactory | None = None,
     ):
         if isinstance(url, AnyUrl):
             url = str(url)
         if not isinstance(url, str) or not url.startswith("http"):
             raise ValueError("Invalid HTTP/S URL provided for Streamable HTTP.")
 
-        # Ensure the URL path ends with a trailing slash to avoid automatic redirects
-        parsed = urlparse(url)
-        if not parsed.path.endswith("/"):
-            parsed = parsed._replace(path=parsed.path + "/")
-            url = urlunparse(parsed)
+        # Don't modify the URL path - respect the exact URL provided by the user
+        # Some servers are strict about trailing slashes (e.g., PayPal MCP)
 
         self.url = url
         self.headers = headers or {}
@@ -344,8 +346,7 @@ class StdioTransport(ClientTransport):
     ) -> AsyncIterator[ClientSession]:
         try:
             await self.connect(**session_kwargs)
-            assert self._session is not None
-            yield self._session
+            yield cast(ClientSession, self._session)
         finally:
             if not self.keep_alive:
                 await self.disconnect()
@@ -358,36 +359,33 @@ class StdioTransport(ClientTransport):
         if self._connect_task is not None:
             return
 
-        async def _connect_task():
-            from mcp.client.stdio import stdio_client
-
-            async with contextlib.AsyncExitStack() as stack:
-                try:
-                    server_params = StdioServerParameters(
-                        command=self.command, args=self.args, env=self.env, cwd=self.cwd
-                    )
-                    transport = await stack.enter_async_context(
-                        stdio_client(server_params)
-                    )
-                    read_stream, write_stream = transport
-                    self._session = await stack.enter_async_context(
-                        ClientSession(read_stream, write_stream, **session_kwargs)
-                    )
-
-                    logger.debug("Stdio transport connected")
-                    self._ready_event.set()
-
-                    # Wait until disconnect is requested (stop_event is set)
-                    await self._stop_event.wait()
-                finally:
-                    # Clean up client on exit
-                    self._session = None
-                    logger.debug("Stdio transport disconnected")
+        session_future: asyncio.Future[ClientSession] = asyncio.Future()
 
         # start the connection task
-        self._connect_task = asyncio.create_task(_connect_task())
+        self._connect_task = asyncio.create_task(
+            _stdio_transport_connect_task(
+                command=self.command,
+                args=self.args,
+                env=self.env,
+                cwd=self.cwd,
+                session_kwargs=session_kwargs,
+                ready_event=self._ready_event,
+                stop_event=self._stop_event,
+                session_future=session_future,
+            )
+        )
+
         # wait for the client to be ready before returning
         await self._ready_event.wait()
+
+        # Check if connect task completed with an exception (early failure)
+        if self._connect_task.done():
+            exception = self._connect_task.exception()
+            if exception is not None:
+                raise exception
+
+        self._session = await session_future
+        return self._session
 
     async def disconnect(self):
         if self._connect_task is None:
@@ -407,10 +405,61 @@ class StdioTransport(ClientTransport):
     async def close(self):
         await self.disconnect()
 
+    def __del__(self):
+        """Ensure that we send a disconnection signal to the transport task if we are being garbage collected."""
+        if not self._stop_event.is_set():
+            self._stop_event.set()
+
     def __repr__(self) -> str:
         return (
             f"<{self.__class__.__name__}(command='{self.command}', args={self.args})>"
         )
+
+
+async def _stdio_transport_connect_task(
+    command: str,
+    args: list[str],
+    env: dict[str, str] | None,
+    cwd: str | None,
+    session_kwargs: SessionKwargs,
+    ready_event: anyio.Event,
+    stop_event: anyio.Event,
+    session_future: asyncio.Future[ClientSession],
+):
+    """A standalone connection task for a stdio transport. It is not a part of the StdioTransport class
+    to ensure that the connection task does not hold a reference to the Transport object."""
+
+    from mcp.client.stdio import stdio_client
+
+    try:
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                server_params = StdioServerParameters(
+                    command=command,
+                    args=args,
+                    env=env,
+                    cwd=cwd,
+                )
+                transport = await stack.enter_async_context(stdio_client(server_params))
+                read_stream, write_stream = transport
+                session_future.set_result(
+                    await stack.enter_async_context(
+                        ClientSession(read_stream, write_stream, **session_kwargs)
+                    )
+                )
+
+                logger.debug("Stdio transport connected")
+                ready_event.set()
+
+                # Wait until disconnect is requested (stop_event is set)
+                await stop_event.wait()
+            finally:
+                # Clean up client on exit
+                logger.debug("Stdio transport disconnected")
+    except Exception:
+        # Ensure ready event is set even if connection fails
+        ready_event.set()
+        raise
 
 
 class PythonStdioTransport(StdioTransport):
@@ -528,6 +577,63 @@ class NodeStdioTransport(StdioTransport):
         self.script_path = script_path
 
 
+class UvStdioTransport(StdioTransport):
+    """Transport for running commands via the uv tool."""
+
+    def __init__(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        module: bool = False,
+        project_directory: str | None = None,
+        python_version: str | None = None,
+        with_packages: list[str] | None = None,
+        with_requirements: str | None = None,
+        env_vars: dict[str, str] | None = None,
+        keep_alive: bool | None = None,
+    ):
+        # Basic validation
+        if project_directory and not Path(project_directory).exists():
+            raise NotADirectoryError(
+                f"Project directory not found: {project_directory}"
+            )
+
+        # Build uv arguments
+        uv_args: list[str] = ["run"]
+        if project_directory:
+            uv_args.extend(["--directory", str(project_directory)])
+        if python_version:
+            uv_args.extend(["--python", python_version])
+        for pkg in with_packages or []:
+            uv_args.extend(["--with", pkg])
+        if with_requirements:
+            uv_args.extend(["--with-requirements", str(with_requirements)])
+        if module:
+            uv_args.append("--module")
+
+        if not args:
+            args = []
+
+        uv_args.extend([command, *args])
+
+        # Get environment with any additional variables
+        env: dict[str, str] | None = None
+        if env_vars or project_directory:
+            env = os.environ.copy()
+            if project_directory:
+                env["UV_PROJECT_DIR"] = str(project_directory)
+            if env_vars:
+                env.update(env_vars)
+
+        super().__init__(
+            command="uv",
+            args=uv_args,
+            env=env,
+            cwd=None,  # Use --directory flag instead of cwd
+            keep_alive=keep_alive,
+        )
+
+
 class UvxStdioTransport(StdioTransport):
     """Transport for running commands via the uvx tool."""
 
@@ -565,7 +671,7 @@ class UvxStdioTransport(StdioTransport):
             )
 
         # Build uvx arguments
-        uvx_args = []
+        uvx_args: list[str] = []
         if python_version:
             uvx_args.extend(["--python", python_version])
         if from_package:
@@ -578,11 +684,9 @@ class UvxStdioTransport(StdioTransport):
         if tool_args:
             uvx_args.extend(tool_args)
 
-        # Get environment with any additional variables
-        env = None
+        env: dict[str, str] | None = None
         if env_vars:
             env = os.environ.copy()
-            env.update(env_vars)
 
         super().__init__(
             command="uvx",
@@ -591,7 +695,7 @@ class UvxStdioTransport(StdioTransport):
             cwd=project_directory,
             keep_alive=keep_alive,
         )
-        self.tool_name = tool_name
+        self.tool_name: str = tool_name
 
 
 class NpxStdioTransport(StdioTransport):
@@ -718,7 +822,7 @@ class MCPConfigTransport(ClientTransport):
 
     1. If the MCPConfig contains exactly one server, it creates a direct transport to that server.
     2. If the MCPConfig contains multiple servers, it creates a composite client by mounting
-       all servers on a single FastMCP instance, with each server's name used as its mounting prefix.
+       all servers on a single FastMCP instance, with each server's name, by default, used as its mounting prefix.
 
     In the multi-server case, tools are accessible with the prefix pattern `{server_name}_{tool_name}`
     and resources with the pattern `protocol://{server_name}/path/to/resource`.
@@ -758,12 +862,14 @@ class MCPConfigTransport(ClientTransport):
         ```
     """
 
-    def __init__(self, config: MCPConfig | dict):
-        from fastmcp.client.client import Client
+    def __init__(self, config: MCPConfig | dict, name_as_prefix: bool = True):
+        from fastmcp.utilities.mcp_config import mcp_config_to_servers_and_transports
 
         if isinstance(config, dict):
             config = MCPConfig.from_dict(config)
         self.config = config
+
+        self._underlying_transports: list[ClientTransport] = []
 
         # if there are no servers, raise an error
         if len(self.config.mcpServers) == 0:
@@ -772,18 +878,21 @@ class MCPConfigTransport(ClientTransport):
         # if there's exactly one server, create a client for that server
         elif len(self.config.mcpServers) == 1:
             self.transport = list(self.config.mcpServers.values())[0].to_transport()
+            self._underlying_transports.append(self.transport)
 
         # otherwise create a composite client
         else:
-            composite_server = FastMCP()
+            self._composite_server = FastMCP[Any]()
 
-            for name, server in self.config.mcpServers.items():
-                server_client = Client(transport=server.to_transport())
-                composite_server.mount(
-                    prefix=name, server=FastMCP.as_proxy(server_client)
+            for name, server, transport in mcp_config_to_servers_and_transports(
+                self.config
+            ):
+                self._underlying_transports.append(transport)
+                self._composite_server.mount(
+                    server, prefix=name if name_as_prefix else None
                 )
 
-            self.transport = FastMCPTransport(mcp=composite_server)
+            self.transport = FastMCPTransport(mcp=self._composite_server)
 
     @contextlib.asynccontextmanager
     async def connect_session(
@@ -791,6 +900,10 @@ class MCPConfigTransport(ClientTransport):
     ) -> AsyncIterator[ClientSession]:
         async with self.transport.connect_session(**session_kwargs) as session:
             yield session
+
+    async def close(self):
+        for transport in self._underlying_transports:
+            await transport.close()
 
     def __repr__(self) -> str:
         return f"<MCPConfigTransport(config='{self.config}')>"

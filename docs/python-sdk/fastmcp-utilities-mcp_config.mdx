@@ -7,44 +7,22 @@ sidebarTitle: mcp_config
 
 ## Functions
 
-### `infer_transport_type_from_url`
+### `mcp_config_to_servers_and_transports` <sup><a href="https://github.com/jlowin/fastmcp/blob/main/src/fastmcp/utilities/mcp_config.py#L11" target="_blank"><Icon icon="github" style="width: 14px; height: 14px;" /></a></sup>
 
 ```python
-infer_transport_type_from_url(url: str | AnyUrl) -> Literal['streamable-http', 'sse']
+mcp_config_to_servers_and_transports(config: MCPConfig) -> list[tuple[str, FastMCP[Any], ClientTransport]]
 ```
 
 
-Infer the appropriate transport type from the given URL.
+A utility function to convert each entry of an MCP Config into a transport and server.
 
 
-## Classes
-
-### `StdioMCPServer`
-
-**Methods:**
-
-#### `to_transport`
+### `mcp_server_type_to_servers_and_transports` <sup><a href="https://github.com/jlowin/fastmcp/blob/main/src/fastmcp/utilities/mcp_config.py#L21" target="_blank"><Icon icon="github" style="width: 14px; height: 14px;" /></a></sup>
 
 ```python
-to_transport(self) -> StdioTransport
+mcp_server_type_to_servers_and_transports(name: str, mcp_server: MCPServerTypes) -> tuple[str, FastMCP[Any], ClientTransport]
 ```
 
-### `RemoteMCPServer`
 
-**Methods:**
+A utility function to convert each entry of an MCP Config into a transport and server.
 
-#### `to_transport`
-
-```python
-to_transport(self) -> StreamableHttpTransport | SSETransport
-```
-
-### `MCPConfig`
-
-**Methods:**
-
-#### `from_dict`
-
-```python
-from_dict(cls, config: dict[str, Any]) -> MCPConfig
-```

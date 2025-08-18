@@ -65,7 +65,8 @@ While FastMCP infers the name and description from your function, you can overri
 @mcp.prompt(
     name="analyze_data_request",          # Custom prompt name
     description="Creates a request to analyze data with specific parameters",  # Custom description
-    tags={"analysis", "data"}             # Optional categorization tags
+    tags={"analysis", "data"},            # Optional categorization tags
+    meta={"version": "1.1", "author": "data-team"}  # Custom metadata
 )
 def data_analysis_prompt(
     data_uri: str = Field(description="The URI of the resource containing the data."),
@@ -85,13 +86,20 @@ def data_analysis_prompt(
 </ParamField>
 
 <ParamField body="tags" type="set[str] | None">
-  A set of strings used to categorize the prompt. Clients might use tags to filter or group available prompts
+  A set of strings used to categorize the prompt. These can be used by the server and, in some cases, by clients to filter or group available prompts.
 </ParamField>
 
 <ParamField body="enabled" type="bool" default="True">
   A boolean to enable or disable the prompt. See [Disabling Prompts](#disabling-prompts) for more information
 </ParamField>
+
+<ParamField body="meta" type="dict[str, Any] | None">
+  <VersionBadge version="2.11.0" />
+  
+  Optional meta information about the prompt. This data is passed through to the MCP client as the `_meta` field of the client-side prompt object and can be used for custom metadata, versioning, or other application-specific purposes.
+</ParamField>
 </Card>
+
 ### Argument Types
 
 <VersionBadge version="2.9.0" />
@@ -180,10 +188,10 @@ FastMCP intelligently handles different return types from your prompt function:
 -   **`Any`**: If the return type is not one of the above, the return value is attempted to be converted to a string and used as a `PromptMessage`.
 
 ```python
-from fastmcp.prompts.prompt import Message
+from fastmcp.prompts.prompt import Message, PromptResult
 
 @mcp.prompt
-def roleplay_scenario(character: str, situation: str) -> list[Message]:
+def roleplay_scenario(character: str, situation: str) -> PromptResult:
     """Sets up a roleplaying scenario with initial messages."""
     return [
         Message(f"Let's roleplay. You are {character}. The situation is: {situation}"),
@@ -237,7 +245,8 @@ def seasonal_prompt(): return "Happy Holidays!"
 seasonal_prompt.disable()
 seasonal_prompt.enable()
 ```
-### Asynchronous Prompts
+
+### Async Prompts
 
 FastMCP seamlessly supports both standard (`def`) and asynchronous (`async def`) functions as prompts.
 
@@ -280,7 +289,26 @@ async def generate_report_request(report_type: str, ctx: Context) -> str:
 
 For full documentation on the Context object and all its capabilities, see the [Context documentation](/servers/context).
 
+### Notifications
 
+<VersionBadge version="2.9.1" />
+
+FastMCP automatically sends `notifications/prompts/list_changed` notifications to connected clients when prompts are added, enabled, or disabled. This allows clients to stay up-to-date with the current prompt set without manually polling for changes.
+
+```python
+@mcp.prompt
+def example_prompt() -> str:
+    return "Hello!"
+
+# These operations trigger notifications:
+mcp.add_prompt(example_prompt)  # Sends prompts/list_changed notification
+example_prompt.disable()        # Sends prompts/list_changed notification  
+example_prompt.enable()         # Sends prompts/list_changed notification
+```
+
+Notifications are only sent when these operations occur within an active MCP request context (e.g., when called from within a tool or other MCP operation). Operations performed during server initialization do not trigger notifications.
+
+Clients can handle these notifications using a [message handler](/clients/messages) to automatically refresh their prompt lists or update their interfaces.
 
 ## Server Behavior
 

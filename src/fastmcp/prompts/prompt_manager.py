@@ -69,8 +69,8 @@ class PromptManager:
                 child_dict = {p.key: p for p in child_results}
                 if mounted.prefix:
                     for prompt in child_dict.values():
-                        prefixed_prompt = prompt.with_key(
-                            f"{mounted.prefix}_{prompt.key}"
+                        prefixed_prompt = prompt.model_copy(
+                            key=f"{mounted.prefix}_{prompt.key}"
                         )
                         all_prompts[prefixed_prompt.key] = prefixed_prompt
                 else:
@@ -78,7 +78,7 @@ class PromptManager:
             except Exception as e:
                 # Skip failed mounts silently, matches existing behavior
                 logger.warning(
-                    f"Failed to get prompts from mounted server '{mounted.prefix}': {e}"
+                    f"Failed to get prompts from server: {mounted.server.name!r}, mounted at: {mounted.prefix!r}: {e}"
                 )
                 continue
 
@@ -172,12 +172,12 @@ class PromptManager:
 
             # Pass through PromptErrors as-is
             except PromptError as e:
-                logger.exception(f"Error rendering prompt {name!r}: {e}")
+                logger.exception(f"Error rendering prompt {name!r}")
                 raise e
 
             # Handle other exceptions
             except Exception as e:
-                logger.exception(f"Error rendering prompt {name!r}: {e}")
+                logger.exception(f"Error rendering prompt {name!r}")
                 if self.mask_error_details:
                     # Mask internal details
                     raise PromptError(f"Error rendering prompt {name!r}") from e

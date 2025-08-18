@@ -3,25 +3,23 @@ from __future__ import annotations
 import asyncio
 import json
 import webbrowser
+from asyncio import Future
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import anyio
 import httpx
-from mcp.client.auth import OAuthClientProvider as _MCPOAuthClientProvider
-from mcp.client.auth import TokenStorage
+from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.shared.auth import (
     OAuthClientInformationFull,
     OAuthClientMetadata,
 )
 from mcp.shared.auth import (
-    OAuthMetadata as _MCPServerOAuthMetadata,
-)
-from mcp.shared.auth import (
     OAuthToken as OAuthToken,
 )
 from pydantic import AnyHttpUrl, ValidationError
+from uvicorn.server import Server
 
 from fastmcp import settings as fastmcp_global_settings
 from fastmcp.client.oauth_callback import (
@@ -37,80 +35,6 @@ logger = get_logger(__name__)
 
 def default_cache_dir() -> Path:
     return fastmcp_global_settings.home / "oauth-mcp-client-cache"
-
-
-# Flexible OAuth models for real-world compatibility
-class ServerOAuthMetadata(_MCPServerOAuthMetadata):
-    """
-    More flexible OAuth metadata model that accepts broader ranges of values
-    than the restrictive MCP standard model.
-
-    This handles real-world OAuth servers like PayPal that may support
-    additional methods not in the MCP specification.
-    """
-
-    # Allow any code challenge methods, not just S256
-    code_challenge_methods_supported: list[str] | None = None
-
-    # Allow any token endpoint auth methods
-    token_endpoint_auth_methods_supported: list[str] | None = None
-
-    # Allow any grant types
-    grant_types_supported: list[str] | None = None
-
-    # Allow any response types
-    response_types_supported: list[str] = ["code"]
-
-    # Allow any response modes
-    response_modes_supported: list[str] | None = None
-
-
-class OAuthClientProvider(_MCPOAuthClientProvider):
-    """
-    OAuth client provider with more flexible OAuth metadata discovery.
-    """
-
-    async def _discover_oauth_metadata(
-        self, server_url: str
-    ) -> ServerOAuthMetadata | None:
-        """
-        Discover OAuth metadata with flexible validation.
-
-        This is nearly identical to the parent implementation but uses
-        ServerOAuthMetadata instead of the restrictive MCP OAuthMetadata.
-        """
-        # Extract base URL per MCP spec
-        auth_base_url = self._get_authorization_base_url(server_url)
-        url = urljoin(auth_base_url, "/.well-known/oauth-authorization-server")
-
-        from mcp.types import LATEST_PROTOCOL_VERSION
-
-        headers = {"MCP-Protocol-Version": LATEST_PROTOCOL_VERSION}
-
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.get(url, headers=headers)
-                if response.status_code == 404:
-                    return None
-                response.raise_for_status()
-                metadata_json = response.json()
-                logger.debug(f"OAuth metadata discovered: {metadata_json}")
-                return ServerOAuthMetadata.model_validate(metadata_json)
-            except Exception:
-                # Retry without MCP header for CORS compatibility
-                try:
-                    response = await client.get(url)
-                    if response.status_code == 404:
-                        return None
-                    response.raise_for_status()
-                    metadata_json = response.json()
-                    logger.debug(
-                        f"OAuth metadata discovered (no MCP header): {metadata_json}"
-                    )
-                    return ServerOAuthMetadata.model_validate(metadata_json)
-                except Exception:
-                    logger.exception("Failed to discover OAuth metadata")
-                    return None
 
 
 class FileTokenStorage(TokenStorage):
@@ -227,41 +151,6 @@ class FileTokenStorage(TokenStorage):
         logger.info("Cleared all OAuth client cache data.")
 
 
-async def discover_oauth_metadata(
-    server_base_url: str, httpx_kwargs: dict[str, Any] | None = None
-) -> _MCPServerOAuthMetadata | None:
-    """
-    Discover OAuth metadata from the server using RFC 8414 well-known endpoint.
-
-    Args:
-        server_base_url: Base URL of the OAuth server (e.g., "https://example.com")
-        httpx_kwargs: Additional kwargs for httpx client
-
-    Returns:
-        OAuth metadata if found, None otherwise
-    """
-    well_known_url = urljoin(server_base_url, "/.well-known/oauth-authorization-server")
-    logger.debug(f"Discovering OAuth metadata from: {well_known_url}")
-
-    async with httpx.AsyncClient(**(httpx_kwargs or {})) as client:
-        try:
-            response = await client.get(well_known_url, timeout=10.0)
-            if response.status_code == 200:
-                logger.debug("Successfully discovered OAuth metadata")
-                return _MCPServerOAuthMetadata.model_validate(response.json())
-            elif response.status_code == 404:
-                logger.debug(
-                    "OAuth metadata not found (404) - server may not require auth"
-                )
-                return None
-            else:
-                logger.warning(f"OAuth metadata request failed: {response.status_code}")
-                return None
-        except (httpx.RequestError, json.JSONDecodeError, ValidationError) as e:
-            logger.debug(f"OAuth metadata discovery failed: {e}")
-            return None
-
-
 async def check_if_auth_required(
     mcp_url: str, httpx_kwargs: dict[str, Any] | None = None
 ) -> bool:
@@ -292,70 +181,86 @@ async def check_if_auth_required(
             return True
 
 
-def OAuth(
-    mcp_url: str,
-    scopes: str | list[str] | None = None,
-    client_name: str = "FastMCP Client",
-    token_storage_cache_dir: Path | None = None,
-    additional_client_metadata: dict[str, Any] | None = None,
-) -> _MCPOAuthClientProvider:
+class OAuth(OAuthClientProvider):
     """
-    Create an OAuthClientProvider for an MCP server.
+    OAuth client provider for MCP servers with browser-based authentication.
 
-    This is intended to be provided to the `auth` parameter of an
-    httpx.AsyncClient (or appropriate FastMCP client/transport instance)
-
-    Args:
-        mcp_url: Full URL to the MCP endpoint (e.g. "http://host/mcp/sse/")
-        scopes: OAuth scopes to request. Can be a
-        space-separated string or a list of strings.
-        client_name: Name for this client during registration
-        token_storage_cache_dir: Directory for FileTokenStorage
-        additional_client_metadata: Extra fields for OAuthClientMetadata
-
-    Returns:
-        OAuthClientProvider
+    This class provides OAuth authentication for FastMCP clients by opening
+    a browser for user authorization and running a local callback server.
     """
-    parsed_url = urlparse(mcp_url)
-    server_base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
-    # Setup OAuth client
-    redirect_port = find_available_port()
-    redirect_uri = f"http://127.0.0.1:{redirect_port}/callback"
+    def __init__(
+        self,
+        mcp_url: str,
+        scopes: str | list[str] | None = None,
+        client_name: str = "FastMCP Client",
+        token_storage_cache_dir: Path | None = None,
+        additional_client_metadata: dict[str, Any] | None = None,
+        callback_port: int | None = None,
+    ):
+        """
+        Initialize OAuth client provider for an MCP server.
 
-    if isinstance(scopes, list):
-        scopes = " ".join(scopes)
+        Args:
+            mcp_url: Full URL to the MCP endpoint (e.g. "http://host/mcp/sse/")
+            scopes: OAuth scopes to request. Can be a
+            space-separated string or a list of strings.
+            client_name: Name for this client during registration
+            token_storage_cache_dir: Directory for FileTokenStorage
+            additional_client_metadata: Extra fields for OAuthClientMetadata
+            callback_port: Fixed port for OAuth callback (default: random available port)
+        """
+        parsed_url = urlparse(mcp_url)
+        server_base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
-    client_metadata = OAuthClientMetadata(
-        client_name=client_name,
-        redirect_uris=[AnyHttpUrl(redirect_uri)],
-        grant_types=["authorization_code", "refresh_token"],
-        response_types=["code"],
-        token_endpoint_auth_method="client_secret_post",
-        scope=scopes,
-        **(additional_client_metadata or {}),
-    )
+        # Setup OAuth client
+        self.redirect_port = callback_port or find_available_port()
+        redirect_uri = f"http://localhost:{self.redirect_port}/callback"
 
-    # Create server-specific token storage
-    storage = FileTokenStorage(
-        server_url=server_base_url, cache_dir=token_storage_cache_dir
-    )
+        if isinstance(scopes, list):
+            scopes = " ".join(scopes)
 
-    # Define OAuth handlers
-    async def redirect_handler(authorization_url: str) -> None:
+        client_metadata = OAuthClientMetadata(
+            client_name=client_name,
+            redirect_uris=[AnyHttpUrl(redirect_uri)],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            # token_endpoint_auth_method="client_secret_post",
+            scope=scopes,
+            **(additional_client_metadata or {}),
+        )
+
+        # Create server-specific token storage
+        storage = FileTokenStorage(
+            server_url=server_base_url, cache_dir=token_storage_cache_dir
+        )
+
+        # Store server_base_url for use in callback_handler
+        self.server_base_url = server_base_url
+
+        # Initialize parent class
+        super().__init__(
+            server_url=server_base_url,
+            client_metadata=client_metadata,
+            storage=storage,
+            redirect_handler=self.redirect_handler,
+            callback_handler=self.callback_handler,
+        )
+
+    async def redirect_handler(self, authorization_url: str) -> None:
         """Open browser for authorization."""
         logger.info(f"OAuth authorization URL: {authorization_url}")
         webbrowser.open(authorization_url)
 
-    async def callback_handler() -> tuple[str, str | None]:
+    async def callback_handler(self) -> tuple[str, str | None]:
         """Handle OAuth callback and return (auth_code, state)."""
         # Create a future to capture the OAuth response
-        response_future = asyncio.get_running_loop().create_future()
+        response_future: Future[Any] = asyncio.get_running_loop().create_future()
 
         # Create server with the future
-        server = create_oauth_callback_server(
-            port=redirect_port,
-            server_url=server_base_url,
+        server: Server = create_oauth_callback_server(
+            port=self.redirect_port,
+            server_url=self.server_base_url,
             response_future=response_future,
         )
 
@@ -363,7 +268,7 @@ def OAuth(
         async with anyio.create_task_group() as tg:
             tg.start_soon(server.serve)
             logger.info(
-                f"🎧 OAuth callback server started on http://127.0.0.1:{redirect_port}"
+                f"🎧 OAuth callback server started on http://localhost:{self.redirect_port}"
             )
 
             TIMEOUT = 300.0  # 5 minute timeout
@@ -378,13 +283,4 @@ def OAuth(
                 await asyncio.sleep(0.1)  # Allow server to shutdown gracefully
                 tg.cancel_scope.cancel()
 
-    # Create OAuth provider
-    oauth_provider = OAuthClientProvider(
-        server_url=server_base_url,
-        client_metadata=client_metadata,
-        storage=storage,
-        redirect_handler=redirect_handler,
-        callback_handler=callback_handler,
-    )
-
-    return oauth_provider
+        raise RuntimeError("OAuth callback handler could not be started")

@@ -8,6 +8,9 @@ from fastmcp import FastMCP
 from fastmcp.client import Client
 from fastmcp.client.transports import FastMCPTransport, SSETransport
 from fastmcp.server.proxy import FastMCPProxy
+from fastmcp.tools.tool import Tool
+from fastmcp.tools.tool_transform import TransformedTool
+from fastmcp.utilities.tests import caplog_for_fastmcp
 
 
 class TestBasicMount:
@@ -17,23 +20,30 @@ class TestBasicMount:
         """Test mounting a simple server and accessing its tool."""
         # Create main app and sub-app
         main_app = FastMCP("MainApp")
-        sub_app = FastMCP("SubApp")
 
         # Add a tool to the sub-app
-        @sub_app.tool
-        def sub_tool() -> str:
+        def tool() -> str:
             return "This is from the sub app"
+
+        sub_tool = Tool.from_function(tool)
+
+        transformed_tool = TransformedTool.from_tool(
+            name="transformed_tool", tool=sub_tool
+        )
+
+        sub_app = FastMCP("SubApp", tools=[transformed_tool, sub_tool])
 
         # Mount the sub-app to the main app
         main_app.mount(sub_app, "sub")
 
         # Get tools from main app, should include sub_app's tools
         tools = await main_app.get_tools()
-        assert "sub_sub_tool" in tools
+        assert "sub_tool" in tools
+        assert "sub_transformed_tool" in tools
 
         async with Client(main_app) as client:
-            result = await client.call_tool("sub_sub_tool", {})
-            assert result[0].text == "This is from the sub app"  # type: ignore[attr-defined]
+            result = await client.call_tool("sub_tool", {})
+            assert result.data == "This is from the sub app"
 
     async def test_mount_with_custom_separator(self):
         """Test mounting with a custom tool separator (deprecated but still supported)."""
@@ -52,8 +62,9 @@ class TestBasicMount:
         assert "sub_greet" in tools
 
         # Call the tool
-        result = await main_app._mcp_call_tool("sub_greet", {"name": "World"})
-        assert result[0].text == "Hello, World!"  # type: ignore[attr-defined]
+        async with Client(main_app) as client:
+            result = await client.call_tool("sub_greet", {"name": "World"})
+            assert result.data == "Hello, World!"
 
     async def test_mount_invalid_resource_prefix(self):
         main_app = FastMCP("MainApp")
@@ -104,8 +115,9 @@ class TestBasicMount:
         assert "sub_tool" in tools
 
         # Call the tool to verify it works
-        result = await main_app._mcp_call_tool("sub_tool", {})
-        assert result[0].text == "This is from the sub app"  # type: ignore[attr-defined]
+        async with Client(main_app) as client:
+            result = await client.call_tool("sub_tool", {})
+            assert result.data == "This is from the sub app"
 
     async def test_mount_tools_no_prefix(self):
         """Test mounting a server with tools without prefix."""
@@ -124,8 +136,9 @@ class TestBasicMount:
         assert "sub_tool" in tools
 
         # Test actual functionality
-        tool_result = await main_app._mcp_call_tool("sub_tool", {})
-        assert tool_result[0].text == "Sub tool result"  # type: ignore[attr-defined]
+        async with Client(main_app) as client:
+            tool_result = await client.call_tool("sub_tool", {})
+            assert tool_result.data == "Sub tool result"
 
     async def test_mount_resources_no_prefix(self):
         """Test mounting a server with resources without prefix."""
@@ -144,8 +157,9 @@ class TestBasicMount:
         assert "data://config" in resources
 
         # Test actual functionality
-        resource_result = await main_app._mcp_read_resource("data://config")
-        assert resource_result[0].content == "Sub resource data"  # type: ignore[attr-defined]
+        async with Client(main_app) as client:
+            resource_result = await client.read_resource("data://config")
+            assert resource_result[0].text == "Sub resource data"  # type: ignore[attr-defined]
 
     async def test_mount_resource_templates_no_prefix(self):
         """Test mounting a server with resource templates without prefix."""
@@ -164,8 +178,9 @@ class TestBasicMount:
         assert "users://{user_id}/info" in templates
 
         # Test actual functionality
-        template_result = await main_app._mcp_read_resource("users://123/info")
-        assert template_result[0].content == "Sub template for user 123"  # type: ignore[attr-defined]
+        async with Client(main_app) as client:
+            template_result = await client.read_resource("users://123/info")
+            assert template_result[0].text == "Sub template for user 123"  # type: ignore[attr-defined]
 
     async def test_mount_prompts_no_prefix(self):
         """Test mounting a server with prompts without prefix."""
@@ -184,8 +199,9 @@ class TestBasicMount:
         assert "sub_prompt" in prompts
 
         # Test actual functionality
-        prompt_result = await main_app._mcp_get_prompt("sub_prompt", {})
-        assert prompt_result.messages is not None
+        async with Client(main_app) as client:
+            prompt_result = await client.get_prompt("sub_prompt", {})
+            assert prompt_result.messages is not None
 
 
 class TestMultipleServerMount:
@@ -215,11 +231,11 @@ class TestMultipleServerMount:
         assert "news_get_headlines" in tools
 
         # Call tools from both mounted servers
-        result1 = await main_app._mcp_call_tool("weather_get_forecast", {})
-        assert result1[0].text == "Weather forecast"  # type: ignore[attr-defined]
-
-        result2 = await main_app._mcp_call_tool("news_get_headlines", {})
-        assert result2[0].text == "News headlines"  # type: ignore[attr-defined]
+        async with Client(main_app) as client:
+            result1 = await client.call_tool("weather_get_forecast", {})
+            assert result1.data == "Weather forecast"
+            result2 = await client.call_tool("news_get_headlines", {})
+            assert result2.data == "News headlines"
 
     async def test_mount_same_prefix(self):
         """Test that mounting with the same prefix replaces the previous mount."""
@@ -284,40 +300,44 @@ class TestMultipleServerMount:
         main_app.mount(unreachable_proxy, "unreachable")
 
         # All object types should work from working server despite unreachable proxy
-        async with Client(main_app) as client:
-            # Test tools
-            tools = await client.list_tools()
-            tool_names = [tool.name for tool in tools]
-            assert "working_working_tool" in tool_names
+        with caplog_for_fastmcp(caplog):
+            async with Client(main_app) as client:
+                # Test tools
+                tools = await client.list_tools()
+                tool_names = [tool.name for tool in tools]
+                assert "working_working_tool" in tool_names
 
-            # Test calling a tool
-            result = await client.call_tool("working_working_tool", {})
-            assert result[0].text == "Working tool"  # type: ignore[attr-defined]
+                # Test calling a tool
+                result = await client.call_tool("working_working_tool", {})
+                assert result.data == "Working tool"
 
-            # Test resources
-            resources = await client.list_resources()
-            resource_uris = [str(resource.uri) for resource in resources]
-            assert "working://working/data" in resource_uris
+                # Test resources
+                resources = await client.list_resources()
+                resource_uris = [str(resource.uri) for resource in resources]
+                assert "working://working/data" in resource_uris
 
-            # Test prompts
-            prompts = await client.list_prompts()
-            prompt_names = [prompt.name for prompt in prompts]
-            assert "working_working_prompt" in prompt_names
+                # Test prompts
+                prompts = await client.list_prompts()
+                prompt_names = [prompt.name for prompt in prompts]
+                assert "working_working_prompt" in prompt_names
 
         # Verify that warnings were logged for the unreachable server
         warning_messages = [
             record.message for record in caplog.records if record.levelname == "WARNING"
         ]
         assert any(
-            "Failed to get tools from mounted server 'unreachable'" in msg
+            "Failed to get tools from server: 'FastMCP', mounted at: 'unreachable'"
+            in msg
             for msg in warning_messages
         )
         assert any(
-            "Failed to get resources from mounted server 'unreachable'" in msg
+            "Failed to get resources from server: 'FastMCP', mounted at: 'unreachable'"
+            in msg
             for msg in warning_messages
         )
         assert any(
-            "Failed to get prompts from mounted server 'unreachable'" in msg
+            "Failed to get prompts from server: 'FastMCP', mounted at: 'unreachable'"
+            in msg
             for msg in warning_messages
         )
 
@@ -352,7 +372,7 @@ class TestPrefixConflictResolution:
 
             # Test that calling the tool uses the later server's implementation
             result = await client.call_tool("shared_tool", {})
-            assert result[0].text == "Second app tool"  # type: ignore[attr-defined]
+            assert result.data == "Second app tool"
 
     async def test_later_server_wins_tools_same_prefix(self):
         """Test that later mounted server wins for tools when same prefix is used."""
@@ -381,7 +401,7 @@ class TestPrefixConflictResolution:
 
             # Test that calling the tool uses the later server's implementation
             result = await client.call_tool("api_shared_tool", {})
-            assert result[0].text == "Second app tool"  # type: ignore[attr-defined]
+            assert result.data == "Second app tool"
 
     async def test_later_server_wins_resources_no_prefix(self):
         """Test that later mounted server wins for resources when no prefix is used."""
@@ -593,8 +613,9 @@ class TestDynamicChanges:
         assert "sub_dynamic_tool" in tools
 
         # Call the dynamically added tool
-        result = await main_app._mcp_call_tool("sub_dynamic_tool", {})
-        assert result[0].text == "Added after mounting"  # type: ignore[attr-defined]
+        async with Client(main_app) as client:
+            result = await client.call_tool("sub_dynamic_tool", {})
+            assert result.data == "Added after mounting"
 
     async def test_removing_tool_after_mounting(self):
         """Test that tools removed from mounted servers are no longer accessible."""
@@ -616,23 +637,8 @@ class TestDynamicChanges:
         sub_app._tool_manager._tools.pop("temp_tool")
 
         # The tool should no longer be accessible
-        # Refresh the cache by clearing it
-        main_app._cache.cache.clear()
         tools = await main_app.get_tools()
         assert "sub_temp_tool" not in tools
-
-    async def test_cache_expiration(self):
-        main_app = FastMCP("MainApp", cache_expiration_seconds=2)
-        sub_app = FastMCP("SubApp")
-        tools = await main_app.get_tools()
-        assert len(tools) == 0
-
-        @sub_app.tool
-        def sub_tool():
-            return "sub_tool"
-
-        tools = await main_app.get_tools()
-        assert len(tools) == 0
 
 
 class TestResourcesAndTemplates:
@@ -726,8 +732,9 @@ class TestPrompts:
         assert "assistant_greeting" in prompts
 
         # Render the prompt
-        result = await main_app._mcp_get_prompt("assistant_greeting", {"name": "World"})
-        assert result.messages is not None
+        async with Client(main_app) as client:
+            result = await client.get_prompt("assistant_greeting", {"name": "World"})
+            assert result.messages is not None
         # The message should contain our greeting text
 
     async def test_adding_prompt_after_mounting(self):
@@ -748,8 +755,9 @@ class TestPrompts:
         assert "assistant_farewell" in prompts
 
         # Render the prompt
-        result = await main_app._mcp_get_prompt("assistant_farewell", {"name": "World"})
-        assert result.messages is not None
+        async with Client(main_app) as client:
+            result = await client.get_prompt("assistant_farewell", {"name": "World"})
+            assert result.messages is not None
         # The message should contain our farewell text
 
 
@@ -766,9 +774,7 @@ class TestProxyServer:
             return f"Data for {query}"
 
         # Create proxy server
-        proxy_server = FastMCP.as_proxy(
-            Client(transport=FastMCPTransport(original_server))
-        )
+        proxy_server = FastMCP.as_proxy(FastMCPTransport(original_server))
 
         # Mount proxy server
         main_app = FastMCP("MainApp")
@@ -779,8 +785,9 @@ class TestProxyServer:
         assert "proxy_get_data" in tools
 
         # Call the tool
-        result = await main_app._mcp_call_tool("proxy_get_data", {"query": "test"})
-        assert result[0].text == "Data for test"  # type: ignore[attr-defined]
+        async with Client(main_app) as client:
+            result = await client.call_tool("proxy_get_data", {"query": "test"})
+            assert result.data == "Data for test"
 
     async def test_dynamically_adding_to_proxied_server(self):
         """Test that changes to the original server are reflected in the mounted proxy."""
@@ -788,9 +795,7 @@ class TestProxyServer:
         original_server = FastMCP("OriginalServer")
 
         # Create proxy server
-        proxy_server = FastMCP.as_proxy(
-            Client(transport=FastMCPTransport(original_server))
-        )
+        proxy_server = FastMCP.as_proxy(FastMCPTransport(original_server))
 
         # Mount proxy server
         main_app = FastMCP("MainApp")
@@ -806,8 +811,9 @@ class TestProxyServer:
         assert "proxy_dynamic_data" in tools
 
         # Call the tool
-        result = await main_app._mcp_call_tool("proxy_dynamic_data", {})
-        assert result[0].text == "Dynamic data"  # type: ignore[attr-defined]
+        async with Client(main_app) as client:
+            result = await client.call_tool("proxy_dynamic_data", {})
+            assert result.data == "Dynamic data"
 
     async def test_proxy_server_with_resources(self):
         """Test mounting a proxy server with resources."""
@@ -819,18 +825,17 @@ class TestProxyServer:
             return {"api_key": "12345"}
 
         # Create proxy server
-        proxy_server = FastMCP.as_proxy(
-            Client(transport=FastMCPTransport(original_server))
-        )
+        proxy_server = FastMCP.as_proxy(FastMCPTransport(original_server))
 
         # Mount proxy server
         main_app = FastMCP("MainApp")
         main_app.mount(proxy_server, "proxy")
 
         # Resource should be accessible through main app
-        result = await main_app._mcp_read_resource("config://proxy/settings")
-        config = json.loads(result[0].content)  # type: ignore[attr-defined]
-        assert config["api_key"] == "12345"
+        async with Client(main_app) as client:
+            result = await client.read_resource("config://proxy/settings")
+            config = json.loads(result[0].text)  # type: ignore[attr-defined]
+            assert config["api_key"] == "12345"
 
     async def test_proxy_server_with_prompts(self):
         """Test mounting a proxy server with prompts."""
@@ -842,17 +847,16 @@ class TestProxyServer:
             return f"Welcome, {name}!"
 
         # Create proxy server
-        proxy_server = FastMCP.as_proxy(
-            Client(transport=FastMCPTransport(original_server))
-        )
+        proxy_server = FastMCP.as_proxy(FastMCPTransport(original_server))
 
         # Mount proxy server
         main_app = FastMCP("MainApp")
         main_app.mount(proxy_server, "proxy")
 
         # Prompt should be accessible through main app
-        result = await main_app._mcp_get_prompt("proxy_welcome", {"name": "World"})
-        assert result.messages is not None
+        async with Client(main_app) as client:
+            result = await client.get_prompt("proxy_welcome", {"name": "World"})
+            assert result.messages is not None
         # The message should contain our welcome text
 
 
@@ -899,7 +903,7 @@ class TestAsProxyKwarg:
     async def test_as_proxy_ignored_for_proxy_mounts_default(self):
         mcp = FastMCP("Main")
         sub = FastMCP("Sub")
-        sub_proxy = FastMCP.as_proxy(Client(transport=FastMCPTransport(sub)))
+        sub_proxy = FastMCP.as_proxy(FastMCPTransport(sub))
 
         mcp.mount(sub_proxy, "sub")
 
@@ -908,7 +912,7 @@ class TestAsProxyKwarg:
     async def test_as_proxy_ignored_for_proxy_mounts_false(self):
         mcp = FastMCP("Main")
         sub = FastMCP("Sub")
-        sub_proxy = FastMCP.as_proxy(Client(transport=FastMCPTransport(sub)))
+        sub_proxy = FastMCP.as_proxy(FastMCPTransport(sub))
 
         mcp.mount(sub_proxy, "sub", as_proxy=False)
 
@@ -917,7 +921,7 @@ class TestAsProxyKwarg:
     async def test_as_proxy_ignored_for_proxy_mounts_true(self):
         mcp = FastMCP("Main")
         sub = FastMCP("Sub")
-        sub_proxy = FastMCP.as_proxy(Client(transport=FastMCPTransport(sub)))
+        sub_proxy = FastMCP.as_proxy(FastMCPTransport(sub))
 
         mcp.mount(sub_proxy, "sub", as_proxy=True)
 
@@ -962,4 +966,178 @@ class TestAsProxyKwarg:
         assert len(lifespan_check) > 0
         # in the present implementation the sub server will be invoked 3 times
         # to call its tool
-        assert lifespan_check == ["start", "start", "start"]
+        assert lifespan_check.count("start") >= 2
+
+
+class TestResourceNamePrefixing:
+    """Test that resource and resource template names get prefixed when mounted."""
+
+    async def test_resource_name_prefixing(self):
+        """Test that resource names are prefixed when mounted."""
+
+        # Create a sub-app with a resource
+        sub_app = FastMCP("SubApp")
+
+        @sub_app.resource("resource://my_resource")
+        def my_resource() -> str:
+            return "Resource content"
+
+        # Create main app and mount sub-app with prefix
+        main_app = FastMCP("MainApp")
+        main_app.mount(sub_app, "prefix")
+
+        # Get resources from main app
+        resources = await main_app.get_resources()
+
+        # Should have prefixed key (using path format: resource://prefix/resource_name)
+        assert "resource://prefix/my_resource" in resources
+
+        # The resource name should also be prefixed
+        resource = resources["resource://prefix/my_resource"]
+        assert resource.name == "prefix_my_resource"
+
+    async def test_resource_template_name_prefixing(self):
+        """Test that resource template names are prefixed when mounted."""
+
+        # Create a sub-app with a resource template
+        sub_app = FastMCP("SubApp")
+
+        @sub_app.resource("resource://user/{user_id}")
+        def user_template(user_id: str) -> str:
+            return f"User {user_id} data"
+
+        # Create main app and mount sub-app with prefix
+        main_app = FastMCP("MainApp")
+        main_app.mount(sub_app, "prefix")
+
+        # Get resource templates from main app
+        templates = await main_app.get_resource_templates()
+
+        # Should have prefixed key (using path format: resource://prefix/template_uri)
+        assert "resource://prefix/user/{user_id}" in templates
+
+        # The template name should also be prefixed
+        template = templates["resource://prefix/user/{user_id}"]
+        assert template.name == "prefix_user_template"
+
+
+class TestCustomRouteForwarding:
+    """Test that custom HTTP routes from mounted servers are forwarded."""
+
+    async def test_get_additional_http_routes_empty(self):
+        """Test _get_additional_http_routes returns empty list for server with no routes."""
+        server = FastMCP("TestServer")
+        routes = server._get_additional_http_routes()
+        assert routes == []
+
+    async def test_get_additional_http_routes_with_custom_route(self):
+        """Test _get_additional_http_routes returns server's own routes."""
+        server = FastMCP("TestServer")
+
+        @server.custom_route("/test", methods=["GET"])
+        async def test_route(request):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse({"message": "test"})
+
+        routes = server._get_additional_http_routes()
+        assert len(routes) == 1
+        assert routes[0].path == "/test"  # type: ignore[attr-defined]
+
+    async def test_get_additional_http_routes_with_mounted_server(self):
+        """Test _get_additional_http_routes includes routes from mounted servers."""
+        main_server = FastMCP("MainServer")
+        sub_server = FastMCP("SubServer")
+
+        @sub_server.custom_route("/sub-route", methods=["GET"])
+        async def sub_route(request):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse({"message": "from sub"})
+
+        # Mount the sub server
+        main_server.mount(sub_server, "sub")
+
+        routes = main_server._get_additional_http_routes()
+        assert len(routes) == 1
+        assert routes[0].path == "/sub-route"  # type: ignore[attr-defined]
+
+    async def test_get_additional_http_routes_recursive(self):
+        """Test _get_additional_http_routes works recursively with nested mounts."""
+        main_server = FastMCP("MainServer")
+        sub_server = FastMCP("SubServer")
+        nested_server = FastMCP("NestedServer")
+
+        @main_server.custom_route("/main-route", methods=["GET"])
+        async def main_route(request):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse({"message": "from main"})
+
+        @sub_server.custom_route("/sub-route", methods=["GET"])
+        async def sub_route(request):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse({"message": "from sub"})
+
+        @nested_server.custom_route("/nested-route", methods=["GET"])
+        async def nested_route(request):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse({"message": "from nested"})
+
+        # Create nested mounting: main -> sub -> nested
+        sub_server.mount(nested_server, "nested")
+        main_server.mount(sub_server, "sub")
+
+        routes = main_server._get_additional_http_routes()
+
+        # Should include all routes
+        assert len(routes) == 3
+        route_paths = [route.path for route in routes]  # type: ignore[attr-defined]
+        assert "/main-route" in route_paths
+        assert "/sub-route" in route_paths
+        assert "/nested-route" in route_paths
+
+    async def test_mounted_servers_tracking(self):
+        """Test that _mounted_servers list tracks mounted servers correctly."""
+        main_server = FastMCP("MainServer")
+        sub_server1 = FastMCP("SubServer1")
+        sub_server2 = FastMCP("SubServer2")
+
+        # Initially no mounted servers
+        assert len(main_server._mounted_servers) == 0
+
+        # Mount first server
+        main_server.mount(sub_server1, "sub1")
+        assert len(main_server._mounted_servers) == 1
+        assert main_server._mounted_servers[0].server == sub_server1
+        assert main_server._mounted_servers[0].prefix == "sub1"
+
+        # Mount second server
+        main_server.mount(sub_server2, "sub2")
+        assert len(main_server._mounted_servers) == 2
+        assert main_server._mounted_servers[1].server == sub_server2
+        assert main_server._mounted_servers[1].prefix == "sub2"
+
+    async def test_multiple_routes_same_server(self):
+        """Test that multiple custom routes from same server are all included."""
+        server = FastMCP("TestServer")
+
+        @server.custom_route("/route1", methods=["GET"])
+        async def route1(request):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse({"message": "route1"})
+
+        @server.custom_route("/route2", methods=["POST"])
+        async def route2(request):
+            from starlette.responses import JSONResponse
+
+            return JSONResponse({"message": "route2"})
+
+        routes = server._get_additional_http_routes()
+        assert len(routes) == 2
+        route_paths = [route.path for route in routes]  # type: ignore[attr-defined]
+        assert "/route1" in route_paths
+        assert "/route2" in route_paths

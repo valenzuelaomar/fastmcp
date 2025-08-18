@@ -36,18 +36,20 @@ class InMemoryOAuthProvider(OAuthProvider):
 
     def __init__(
         self,
-        issuer_url: AnyHttpUrl | str | None = None,
+        base_url: AnyHttpUrl | str | None = None,
         service_documentation_url: AnyHttpUrl | str | None = None,
         client_registration_options: ClientRegistrationOptions | None = None,
         revocation_options: RevocationOptions | None = None,
         required_scopes: list[str] | None = None,
+        resource_server_url: AnyHttpUrl | str | None = None,
     ):
         super().__init__(
-            issuer_url=issuer_url or "http://fastmcp.example.com",
+            base_url=base_url or "http://fastmcp.example.com",
             service_documentation_url=service_documentation_url,
             client_registration_options=client_registration_options,
             revocation_options=revocation_options,
             required_scopes=required_scopes,
+            resource_server_url=resource_server_url,
         )
         self.clients: dict[str, OAuthClientInformationFull] = {}
         self.auth_codes: dict[str, AuthorizationCode] = {}
@@ -270,6 +272,21 @@ class InMemoryOAuthProvider(OAuthProvider):
                 return None
             return token_obj
         return None
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        """
+        Verify a bearer token and return access info if valid.
+
+        This method implements the TokenVerifier protocol by delegating
+        to our existing load_access_token method.
+
+        Args:
+            token: The token string to validate
+
+        Returns:
+            AccessToken object if valid, None if invalid or expired
+        """
+        return await self.load_access_token(token)
 
     def _revoke_internal(
         self, access_token_str: str | None = None, refresh_token_str: str | None = None
