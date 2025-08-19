@@ -8,9 +8,46 @@ from jsonschema_path import SchemaPath
 
 from fastmcp.utilities.logging import get_logger
 
-from .models import HTTPRoute
+from .models import HTTPRoute, ParameterInfo
 
 logger = get_logger(__name__)
+
+
+def _encode_query_parameter(param: ParameterInfo, value: Any) -> Any:
+    """
+    Encode a query parameter value according to OpenAPI style and explode settings.
+
+    Args:
+        param: ParameterInfo containing style and explode settings
+        value: The parameter value to encode
+
+    Returns:
+        The encoded parameter value suitable for httpx
+    """
+    # If not an array, return as-is
+    if not isinstance(value, list):
+        return value
+
+    # Handle explode=True (default behavior) - let httpx handle repeated params
+    if param.explode is not False:  # None or True
+        return value
+
+    # Handle explode=False - need to serialize based on style
+    style = param.style or "form"  # Default style is "form"
+
+    if style == "form":
+        # Comma-delimited: param=val1,val2,val3
+        return ",".join(str(v) for v in value)
+    elif style == "pipeDelimited":
+        # Pipe-delimited: param=val1|val2|val3
+        return "|".join(str(v) for v in value)
+    elif style == "spaceDelimited":
+        # Space-delimited: param=val1 val2 val3
+        return " ".join(str(v) for v in value)
+    else:
+        # Unknown style, fall back to form (comma-delimited)
+        logger.warning(f"Unknown parameter style '{style}', falling back to form style")
+        return ",".join(str(v) for v in value)
 
 
 class RequestDirector:
@@ -89,6 +126,9 @@ class RequestDirector:
         header_params = {}
         body_props = {}
 
+        # Create a lookup for parameter info by name
+        param_info_by_name = {param.name: param for param in route.parameters}
+
         # Use parameter map to route arguments to correct locations
         if hasattr(route, "parameter_map") and route.parameter_map:
             for arg_name, value in flat_args.items():
@@ -108,7 +148,13 @@ class RequestDirector:
                 if location == "path":
                     path_params[openapi_name] = value
                 elif location == "query":
-                    query_params[openapi_name] = value
+                    # Apply OpenAPI style and explode encoding for query parameters
+                    param_info = param_info_by_name.get(openapi_name)
+                    if param_info:
+                        encoded_value = _encode_query_parameter(param_info, value)
+                        query_params[openapi_name] = encoded_value
+                    else:
+                        query_params[openapi_name] = value
                 elif location == "header":
                     header_params[openapi_name] = value
                 elif location == "body":
@@ -138,7 +184,15 @@ class RequestDirector:
                         if location == "path":
                             path_params[base_name] = value
                         elif location == "query":
-                            query_params[base_name] = value
+                            # Apply OpenAPI style and explode encoding for query parameters
+                            param_info = param_info_by_name.get(base_name)
+                            if param_info:
+                                encoded_value = _encode_query_parameter(
+                                    param_info, value
+                                )
+                                query_params[base_name] = encoded_value
+                            else:
+                                query_params[base_name] = value
                         elif location == "header":
                             header_params[base_name] = value
                         continue
@@ -149,7 +203,13 @@ class RequestDirector:
                     if location == "path":
                         path_params[arg_name] = value
                     elif location == "query":
-                        query_params[arg_name] = value
+                        # Apply OpenAPI style and explode encoding for query parameters
+                        param_info = param_info_by_name.get(arg_name)
+                        if param_info:
+                            encoded_value = _encode_query_parameter(param_info, value)
+                            query_params[arg_name] = encoded_value
+                        else:
+                            query_params[arg_name] = value
                     elif location == "header":
                         header_params[arg_name] = value
                 else:
