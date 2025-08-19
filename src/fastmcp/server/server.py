@@ -195,6 +195,7 @@ class FastMCP(Generic[LifespanResultT]):
         else:
             self._has_lifespan = True
         self._mcp_server = LowLevelServer[LifespanResultT](
+            fastmcp=self,
             name=name or "FastMCP",
             version=version,
             instructions=instructions,
