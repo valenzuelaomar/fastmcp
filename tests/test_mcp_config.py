@@ -298,12 +298,12 @@ async def test_multi_client_lifespan(tmp_path: Path):
     with pytest.raises(psutil.NoSuchProcess):
         while True:
             psutil.Process(pid_1)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)
 
     with pytest.raises(psutil.NoSuchProcess):
         while True:
             psutil.Process(pid_2)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)
 
 
 async def test_multi_client_force_close(tmp_path: Path):
