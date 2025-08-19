@@ -242,6 +242,7 @@ async def test_multi_client(tmp_path: Path):
         assert result_2.data == 3
 
 
+@pytest.mark.client_process
 @pytest.mark.skipif(
     running_under_debugger(), reason="Debugger holds a reference to the transport"
 )
