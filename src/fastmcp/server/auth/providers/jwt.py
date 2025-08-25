@@ -217,7 +217,6 @@ class JWTVerifier(TokenVerifier):
                 if v is not NotSet
             }
         )
-        logger.info("Settings: %s", settings)
 
         if not settings.public_key and not settings.jwks_uri:
             raise ValueError("Either public_key or jwks_uri must be provided")
@@ -260,6 +259,8 @@ class JWTVerifier(TokenVerifier):
         self._jwks_cache: dict[str, str] = {}
         self._jwks_cache_time: float = 0
         self._cache_ttl = 3600  # 1 hour
+
+        self.logger.info("Settings: %s", settings)
 
     async def _get_verification_key(self, token: str) -> str:
         """Get the verification key for the token."""
