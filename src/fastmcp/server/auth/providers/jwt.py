@@ -440,6 +440,7 @@ class JWTVerifier(TokenVerifier):
                         client_id,
                     )
                     self.logger.info("Bearer token rejected for client %s", client_id)
+                    return None
 
             # Extract scopes
             scopes = self._extract_scopes(claims)
