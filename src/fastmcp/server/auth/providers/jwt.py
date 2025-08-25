@@ -260,7 +260,6 @@ class JWTVerifier(TokenVerifier):
         self._jwks_cache_time: float = 0
         self._cache_ttl = 3600  # 1 hour
 
-        self.logger.info("Settings: %s", settings)
 
     async def _get_verification_key(self, token: str) -> str:
         """Get the verification key for the token."""
@@ -402,12 +401,19 @@ class JWTVerifier(TokenVerifier):
                     return None
 
             # Validate audience if configured
-            self.logger.info("Claims: %s", claims)
+            self.logger.info("Values provided into JWTVerifier:")
+            self.logger.info("--------------------------------")
+            self.logger.info("Audience: %s", self.audience)
+            self.logger.info("Issuer: %s", self.issuer)
+            self.logger.info("Public key: %s", self.public_key)
+            self.logger.info("JWKS URI: %s", self.jwks_uri)
+            self.logger.info("--------------------------------")
+            self.logger.info("Values from token (claims): %s", claims)
+            self.logger.info("--------------------------------")
             if self.audience:
-                self.logger.info("Audience provided into JWTVerifier: %s", self.audience)
                 aud = claims.get("aud")
                 self.logger.info("aud value from token: %s", aud)
-                self.logger.info("Audience == aud: %s", self.audience == aud)
+                self.logger.info("Audience provided into JWTVerifier == aud value from token: %s", self.audience == aud)
 
                 # Handle different combinations of audience types
                 audience_valid = False
