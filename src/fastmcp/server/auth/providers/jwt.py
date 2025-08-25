@@ -217,6 +217,7 @@ class JWTVerifier(TokenVerifier):
                 if v is not NotSet
             }
         )
+        logger.info("Settings: %s", settings)
 
         if not settings.public_key and not settings.jwks_uri:
             raise ValueError("Either public_key or jwks_uri must be provided")
@@ -402,9 +403,9 @@ class JWTVerifier(TokenVerifier):
             # Validate audience if configured
             self.logger.info("Claims: %s", claims)
             if self.audience:
-                self.logger.info("Audience: %s", self.audience)
+                self.logger.info("Audience provided into JWTVerifier: %s", self.audience)
                 aud = claims.get("aud")
-                self.logger.info("Aud: %s", aud)
+                self.logger.info("aud value from token: %s", aud)
                 self.logger.info("Audience == aud: %s", self.audience == aud)
 
                 # Handle different combinations of audience types
