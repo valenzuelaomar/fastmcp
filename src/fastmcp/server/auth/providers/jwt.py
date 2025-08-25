@@ -400,8 +400,12 @@ class JWTVerifier(TokenVerifier):
                     return None
 
             # Validate audience if configured
+            self.logger.info("Claims: %s", claims)
             if self.audience:
+                self.logger.info("Audience: %s", self.audience)
                 aud = claims.get("aud")
+                self.logger.info("Aud: %s", aud)
+                self.logger.info("Audience == aud: %s", self.audience == aud)
 
                 # Handle different combinations of audience types
                 audience_valid = False
