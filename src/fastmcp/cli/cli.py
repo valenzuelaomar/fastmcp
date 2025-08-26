@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 
 import cyclopts
 import pyperclip
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
@@ -21,7 +21,13 @@ import fastmcp
 from fastmcp.cli import run as run_module
 from fastmcp.cli.install import install_app
 from fastmcp.server.server import FastMCP
-from fastmcp.utilities.inspect import FastMCPInfo, inspect_fastmcp
+from fastmcp.utilities.fastmcp_config import Environment, FastMCPConfig
+from fastmcp.utilities.fastmcp_config.v1.sources.filesystem import FileSystemSource
+from fastmcp.utilities.inspect import (
+    InspectFormat,
+    format_info,
+    inspect_fastmcp,
+)
 from fastmcp.utilities.logging import get_logger
 from fastmcp.utilities.types import get_cached_typeadapter
 
@@ -126,20 +132,21 @@ async def dev(
     server_spec: str | None = None,
     *,
     with_editable: Annotated[
-        Path | None,
+        list[Path] | None,
         cyclopts.Parameter(
-            name=["--with-editable", "-e"],
-            help="Directory containing pyproject.toml to install in editable mode",
+            "--with-editable",
+            help="Directory containing pyproject.toml to install in editable mode (can be used multiple times)",
+            negative="",
         ),
     ] = None,
     with_packages: Annotated[
-        list[str],
+        list[str] | None,
         cyclopts.Parameter(
             "--with",
-            help="Additional packages to install",
+            help="Additional packages to install (can be used multiple times)",
             negative="",
         ),
-    ] = [],
+    ] = None,
     inspector_version: Annotated[
         str | None,
         cyclopts.Parameter(
@@ -188,6 +195,9 @@ async def dev(
     Args:
         server_spec: Python file to run, optionally with :object suffix, or None to auto-detect fastmcp.json
     """
+    # Convert None to empty lists for list parameters
+    with_editable = with_editable or []
+    with_packages = with_packages or []
     from pathlib import Path
 
     from fastmcp.utilities.fastmcp_config import FastMCPConfig
@@ -229,11 +239,9 @@ async def dev(
                 if config.environment.requirements
                 else None
             )
-            with_editable = with_editable or (
-                Path(config.environment.editable)
-                if config.environment.editable
-                else None
-            )
+            # Merge editable paths from config with CLI args
+            if config.environment.editable and not with_editable:
+                with_editable = [Path(p) for p in config.environment.editable]
 
             # Merge packages from both sources
             if config.environment.dependencies:
@@ -254,7 +262,7 @@ async def dev(
         "Starting dev server",
         extra={
             "server_spec": server_spec,
-            "with_editable": str(with_editable) if with_editable else None,
+            "with_editable": [str(p) for p in with_editable] if with_editable else None,
             "with_packages": with_packages,
             "ui_port": ui_port,
             "server_port": server_port,
@@ -296,14 +304,12 @@ async def dev(
             inspector_cmd += f"@{inspector_version}"
 
         # Create Environment object from CLI args
-        from fastmcp.utilities.fastmcp_config import Environment
-
         env_config = Environment(
             python=python,
             dependencies=with_packages if with_packages else None,
             requirements=str(with_requirements) if with_requirements else None,
             project=str(project) if project else None,
-            editable=str(with_editable) if with_editable else None,
+            editable=[str(p) for p in with_editable] if with_editable else None,
         )
         uv_cmd = ["uv"] + env_config.build_uv_args(["fastmcp", "run", server_spec])
 
@@ -394,13 +400,13 @@ async def run(
         ),
     ] = None,
     with_packages: Annotated[
-        list[str],
+        list[str] | None,
         cyclopts.Parameter(
             "--with",
             help="Additional packages to install (can be used multiple times)",
             negative="",
         ),
-    ] = [],
+    ] = None,
     project: Annotated[
         Path | None,
         cyclopts.Parameter(
@@ -415,19 +421,19 @@ async def run(
             help="Requirements file to install dependencies from",
         ),
     ] = None,
-    skip_env: Annotated[
-        bool,
-        cyclopts.Parameter(
-            "--skip-env",
-            help="Skip environment setup with uv (use when already in a uv environment)",
-            negative="",
-        ),
-    ] = False,
     skip_source: Annotated[
         bool,
         cyclopts.Parameter(
             "--skip-source",
             help="Skip source preparation step (use when source is already prepared)",
+            negative="",
+        ),
+    ] = False,
+    skip_env: Annotated[
+        bool,
+        cyclopts.Parameter(
+            "--skip-env",
+            help="Skip environment configuration (for internal use when already in a uv environment)",
             negative="",
         ),
     ] = False,
@@ -448,6 +454,8 @@ async def run(
     Args:
         server_spec: Python file, object specification (file:obj), config file, URL, or None to auto-detect
     """
+    # Convert None to empty lists for list parameters
+    with_packages = with_packages or []
     # Load configuration if needed
     from pathlib import Path
 
@@ -509,7 +517,8 @@ async def run(
                             )
 
                         # Merge environment config with CLI values (CLI takes precedence)
-                        if config.environment:
+                        # BUT: Skip this if --skip-env is set
+                        if config.environment and not skip_env:
                             python = python or config.environment.python
                             project = project or (
                                 Path(config.environment.project)
@@ -552,12 +561,10 @@ async def run(
     )
 
     # Check if we need to use uv run (either from CLI args or config)
-    # Skip if --skip-env flag is set (we're already in a uv environment)
-    needs_uv = not skip_env and (
-        python or with_packages or with_requirements or project or editable
-    )
-    if not skip_env and not needs_uv and config and config.environment:
-        # Check if config's environment needs uv
+    # When --skip-env is set, we ignore config.environment entirely
+    needs_uv = python or with_packages or with_requirements or project or editable
+    if not needs_uv and config and config.environment and not skip_env:
+        # Check if config's environment needs uv (but only if not skipping env)
         needs_uv = config.environment.needs_uv()
 
     if needs_uv:
@@ -615,13 +622,20 @@ async def run(
 async def inspect(
     server_spec: str | None = None,
     *,
+    format: Annotated[
+        InspectFormat | None,
+        cyclopts.Parameter(
+            name=["--format", "-f"],
+            help="Output format: fastmcp (FastMCP-specific) or mcp (MCP protocol). Required when using -o.",
+        ),
+    ] = None,
     output: Annotated[
-        Path,
+        Path | None,
         cyclopts.Parameter(
             name=["--output", "-o"],
-            help="Output file path for the JSON report (default: server-info.json)",
+            help="Output file path for the JSON report. If not specified, outputs to stdout when format is provided.",
         ),
-    ] = Path("server-info.json"),
+    ] = None,
     python: Annotated[
         str | None,
         cyclopts.Parameter(
@@ -630,13 +644,13 @@ async def inspect(
         ),
     ] = None,
     with_packages: Annotated[
-        list[str],
+        list[str] | None,
         cyclopts.Parameter(
             "--with",
             help="Additional packages to install (can be used multiple times)",
             negative="",
         ),
-    ] = [],
+    ] = None,
     project: Annotated[
         Path | None,
         cyclopts.Parameter(
@@ -651,29 +665,39 @@ async def inspect(
             help="Requirements file to install dependencies from",
         ),
     ] = None,
+    skip_env: Annotated[
+        bool,
+        cyclopts.Parameter(
+            "--skip-env",
+            help="Skip environment configuration (for internal use when already in a uv environment)",
+            negative="",
+        ),
+    ] = False,
 ) -> None:
-    """Inspect an MCP server and generate a JSON report.
+    """Inspect an MCP server and display information or generate a JSON report.
 
-    This command analyzes an MCP server and generates a comprehensive JSON report
-    containing information about the server's name, instructions, version, tools,
-    prompts, resources, templates, and capabilities.
+    This command analyzes an MCP server. Without flags, it displays a text summary.
+    Use --format to output complete JSON data.
 
     Examples:
+        # Show text summary
         fastmcp inspect server.py
-        fastmcp inspect server.py -o report.json
-        fastmcp inspect server.py:mcp -o analysis.json
-        fastmcp inspect path/to/server.py:app -o /tmp/server-info.json
+
+        # Output FastMCP format JSON to stdout
+        fastmcp inspect server.py --format fastmcp
+
+        # Save MCP protocol format to file (format required with -o)
+        fastmcp inspect server.py --format mcp -o manifest.json
+
+        # Inspect from fastmcp.json configuration
         fastmcp inspect fastmcp.json
         fastmcp inspect  # auto-detect fastmcp.json
 
     Args:
         server_spec: Python file to inspect, optionally with :object suffix, or fastmcp.json
     """
-    from pathlib import Path
-
-    from fastmcp.utilities.fastmcp_config import FastMCPConfig
-    from fastmcp.utilities.fastmcp_config.v1.sources.filesystem import FileSystemSource
-
+    # Convert None to empty lists for list parameters
+    with_packages = with_packages or []
     config = None
     config_path = None
 
@@ -743,14 +767,15 @@ async def inspect(
         source = FileSystemSource(path=server_spec)
         config = FastMCPConfig(source=source)
 
-    # Check if we need to use uv run
-    needs_uv = python or with_packages or with_requirements or project
-    if not needs_uv and config and config.environment:
-        needs_uv = config.environment.needs_uv()
+    # Check if we need to use uv run (skip if --skip-env is set)
+    needs_uv = False
+    if not skip_env:
+        needs_uv = python or with_packages or with_requirements or project
+        if not needs_uv and config and config.environment:
+            needs_uv = config.environment.needs_uv()
 
     if needs_uv:
         # Build and run uv command
-        from fastmcp.utilities.fastmcp_config import Environment
 
         # Create or update environment config
         env_config = Environment(
@@ -764,9 +789,14 @@ async def inspect(
             "fastmcp",
             "inspect",
             server_spec,
-            "--output",
-            str(output),
+            "--skip-env",  # Prevent infinite loop when calling through uv
         ]
+
+        # Add format and output flags if specified
+        if format:
+            inspect_command.extend(["--format", format.value])
+        if output:
+            inspect_command.extend(["--output", str(output)])
         env_config.run_with_uv(inspect_command)
         return  # run_with_uv exits the process
 
@@ -774,7 +804,8 @@ async def inspect(
         "Inspecting server",
         extra={
             "server_spec": server_spec,
-            "output": str(output),
+            "format": format,
+            "output": str(output) if output else None,
         },
     )
 
@@ -782,29 +813,76 @@ async def inspect(
         # Load the server using the config
         server = await config.source.load_server()
 
-        # Get server information - using native async support
+        # Get basic server information
         info = await inspect_fastmcp(server)
 
-        info_json = TypeAdapter(FastMCPInfo).dump_json(info, indent=2)
+        # Check for invalid combination
+        if output and not format:
+            console.print(
+                "[bold red]Error:[/bold red] --format is required when using -o/--output"
+            )
+            console.print(
+                "[dim]Use --format fastmcp or --format mcp to specify the output format[/dim]"
+            )
+            sys.exit(1)
 
-        # Ensure output directory exists
-        output.parent.mkdir(parents=True, exist_ok=True)
+        # If no format specified, show text summary
+        if format is None:
+            # Display text summary
+            console.print()
 
-        # Write JSON report (always pretty-printed)
-        with output.open("w", encoding="utf-8") as f:
-            f.write(info_json.decode("utf-8"))
+            # Server section
+            console.print("[bold]Server[/bold]")
+            console.print(f"  Name:         {info.name}")
+            if info.version:
+                console.print(f"  Version:      {info.version}")
+            console.print(f"  Generation:   {info.server_generation}")
+            if info.instructions:
+                console.print(f"  Instructions: {info.instructions}")
+            console.print()
 
-        logger.info(f"Server inspection complete. Report saved to {output}")
+            # Components section
+            console.print("[bold]Components[/bold]")
+            console.print(f"  Tools:        {len(info.tools)}")
+            console.print(f"  Prompts:      {len(info.prompts)}")
+            console.print(f"  Resources:    {len(info.resources)}")
+            console.print(f"  Templates:    {len(info.templates)}")
+            console.print()
 
-        # Print summary to console
-        console.print(
-            f"[bold green]✓[/bold green] Inspected server: [bold]{info.name}[/bold]"
-        )
-        console.print(f"  Tools: {len(info.tools)}")
-        console.print(f"  Prompts: {len(info.prompts)}")
-        console.print(f"  Resources: {len(info.resources)}")
-        console.print(f"  Templates: {len(info.templates)}")
-        console.print(f"  Report saved to: [cyan]{output}[/cyan]")
+            # Environment section
+            console.print("[bold]Environment[/bold]")
+            console.print(f"  FastMCP:      {info.fastmcp_version}")
+            console.print(f"  MCP:          {info.mcp_version}")
+            console.print()
+
+            console.print(
+                "[dim]Use --format \\[fastmcp|mcp] for complete JSON output[/dim]"
+            )
+            return
+
+        # Generate formatted JSON output
+        formatted_json = await format_info(server, format, info)
+
+        # Output to file or stdout
+        if output:
+            # Ensure output directory exists
+            output.parent.mkdir(parents=True, exist_ok=True)
+
+            # Write JSON report
+            with output.open("wb") as f:
+                f.write(formatted_json)
+
+            logger.info(f"Server inspection complete. Report saved to {output}")
+
+            # Print confirmation to console
+            console.print(
+                f"[bold green]✓[/bold green] Server inspection saved to: [cyan]{output}[/cyan]"
+            )
+            console.print(f"  Server: [bold]{info.name}[/bold]")
+            console.print(f"  Format: {format.value}")
+        else:
+            # Output JSON to stdout
+            console.print(formatted_json.decode("utf-8"))
 
     except Exception as e:
         logger.error(
@@ -817,6 +895,101 @@ async def inspect(
         console.print(f"[bold red]✗[/bold red] Failed to inspect server: {e}")
         sys.exit(1)
 
+
+# Create project subcommand group
+project_app = cyclopts.App(name="project", help="Manage FastMCP projects")
+
+
+@project_app.command
+async def prepare(
+    config_path: Annotated[
+        str | None,
+        cyclopts.Parameter(help="Path to fastmcp.json configuration file"),
+    ] = None,
+    output_dir: Annotated[
+        str | None,
+        cyclopts.Parameter(help="Directory to create the persistent environment in"),
+    ] = None,
+    skip_source: Annotated[
+        bool,
+        cyclopts.Parameter(help="Skip source preparation (e.g., git clone)"),
+    ] = False,
+) -> None:
+    """Prepare a FastMCP project by creating a persistent uv environment.
+
+    This command creates a persistent uv project with all dependencies installed:
+    - Creates a pyproject.toml with dependencies from the config
+    - Installs all Python packages into a .venv
+    - Prepares the source (git clone, download, etc.) unless --skip-source
+
+    After running this command, you can use:
+    fastmcp run <config> --project <output-dir>
+
+    This is useful for:
+    - CI/CD pipelines with separate build and run stages
+    - Docker images where you prepare during build
+    - Production deployments where you want fast startup times
+
+    Example:
+        fastmcp project prepare myserver.json --output-dir ./prepared-env
+        fastmcp run myserver.json --project ./prepared-env
+    """
+    from pathlib import Path
+
+    from fastmcp.utilities.fastmcp_config import FastMCPConfig
+
+    # Require output-dir
+    if output_dir is None:
+        logger.error(
+            "The --output-dir parameter is required.\n"
+            "Please specify where to create the persistent environment."
+        )
+        sys.exit(1)
+
+    # Auto-detect fastmcp.json if not provided
+    if config_path is None:
+        found_config = FastMCPConfig.find_config()
+        if found_config:
+            config_path = str(found_config)
+            logger.info(f"Using configuration from {config_path}")
+        else:
+            logger.error(
+                "No configuration file specified and no fastmcp.json found.\n"
+                "Please specify a configuration file or create a fastmcp.json."
+            )
+            sys.exit(1)
+
+    config_file = Path(config_path)
+    if not config_file.exists():
+        logger.error(f"Configuration file not found: {config_path}")
+        sys.exit(1)
+
+    output_path = Path(output_dir)
+
+    try:
+        # Load the configuration
+        config = FastMCPConfig.from_file(config_file)
+
+        # Prepare environment and source
+        await config.prepare(
+            skip_source=skip_source,
+            output_dir=output_path,
+        )
+
+        console.print(
+            f"[bold green]✓[/bold green] Project prepared successfully in {output_path}!\n"
+            f"You can now run the server with:\n"
+            f"  [cyan]fastmcp run {config_path} --project {output_dir}[/cyan]"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to prepare project: {e}")
+        console.print(f"[bold red]✗[/bold red] Failed to prepare project: {e}")
+        sys.exit(1)
+
+
+# Add project subcommand group
+app.command(project_app)
 
 # Add install subcommands using proper Cyclopts pattern
 app.command(install_app)
